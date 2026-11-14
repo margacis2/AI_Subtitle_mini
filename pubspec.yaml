@@ -1,0 +1,41 @@
+name: ai_subtitle_studio
+description: "AI Subtitle Studio - On-Device AI Subtitle Transcription, Neural Translation & Subtitle Studio."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^2.0.0
+  flutter_riverpod: ^3.5.0
+  go_router: ^18.1.4
+  sqflite: ^2.4.6
+  path_provider: ^2.1.6
+  file_picker: ^13.3.3
+  video_player: ^2.14.1
+  shared_preferences: ^2.5.6
+  dio: ^5.11.1
+  uuid: ^4.6.0
+  intl: ^0.20.2
+  path: ^1.9.1
+  crypto: ^3.0.6
+  equatable: ^3.0.0
+  device_info_plus: ^13.3.0
+  battery_plus: ^7.1.2
+  permission_handler: ^13.0.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/images/
