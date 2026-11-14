@@ -36,7 +36,7 @@ class AboutScreen extends StatelessWidget {
                 ),
                 const SizedBox(height: 16),
                 const Text(
-                  'AI Subtitle Studio',
+                  'AI Sub Mini',
                   style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 4),
@@ -71,7 +71,7 @@ class AboutScreen extends StatelessWidget {
                   ),
                   SizedBox(height: 8),
                   Text(
-                    'AI Subtitle Studio processes all media, audio, and subtitle files exclusively on your local device hardware using on-device C/C++ neural inference (whisper.cpp). Your personal movies, voice recordings, and subtitle contents are never uploaded to any server, API, or third-party cloud service.',
+                    'AI Sub Mini processes all media, audio, and subtitle files exclusively on your local device hardware using on-device C/C++ neural inference (whisper.cpp). Your personal movies, voice recordings, and subtitle contents are never uploaded to any server, API, or third-party cloud service.',
                     style: TextStyle(fontSize: 13, height: 1.4),
                   ),
                 ],
@@ -90,7 +90,7 @@ class AboutScreen extends StatelessWidget {
                   onTap: () {
                     showLicensePage(
                       context: context,
-                      applicationName: 'AI Subtitle Studio',
+                      applicationName: 'AI Sub Mini',
                       applicationVersion: '1.0.0',
                       applicationIcon: const Icon(Icons.subtitles_rounded),
                     );

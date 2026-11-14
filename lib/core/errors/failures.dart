@@ -1,6 +1,6 @@
 import 'package:equatable/equatable.dart';
 
-/// Base class for all domain and infrastructure failures in AI Subtitle Studio.
+/// Base class for all domain and infrastructure failures in AI Sub Mini.
 abstract class Failure extends Equatable {
   final String message;
   final String? details;

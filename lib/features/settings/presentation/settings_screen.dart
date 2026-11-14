@@ -65,7 +65,7 @@ class SettingsScreen extends ConsumerWidget {
               child: Column(
                 children: [
                   DropdownButtonFormField<String>(
-                    value: settings.defaultExportFormat,
+                    initialValue: settings.defaultExportFormat,
                     decoration: const InputDecoration(
                       labelText: 'Default Export Format',
                       border: OutlineInputBorder(),
@@ -102,7 +102,7 @@ class SettingsScreen extends ConsumerWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   DropdownButtonFormField<ThemeMode>(
-                    value: settings.themeMode,
+                    initialValue: settings.themeMode,
                     decoration: const InputDecoration(
                       labelText: 'Application Theme',
                       border: OutlineInputBorder(),

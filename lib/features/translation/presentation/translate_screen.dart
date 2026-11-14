@@ -81,7 +81,7 @@ class _TranslateScreenState extends ConsumerState<TranslateScreen> {
                   children: [
                     Expanded(
                       child: DropdownButtonFormField<String>(
-                        value: _sourceLang,
+                        initialValue: _sourceLang,
                         decoration: const InputDecoration(labelText: 'From', border: OutlineInputBorder()),
                         items: _langs.map((l) => DropdownMenuItem(value: l['code'], child: Text(l['name']!))).toList(),
                         onChanged: (val) => setState(() => _sourceLang = val!),
@@ -99,7 +99,7 @@ class _TranslateScreenState extends ConsumerState<TranslateScreen> {
                     ),
                     Expanded(
                       child: DropdownButtonFormField<String>(
-                        value: _targetLang,
+                        initialValue: _targetLang,
                         decoration: const InputDecoration(labelText: 'To', border: OutlineInputBorder()),
                         items: _langs.map((l) => DropdownMenuItem(value: l['code'], child: Text(l['name']!))).toList(),
                         onChanged: (val) => setState(() => _targetLang = val!),

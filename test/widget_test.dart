@@ -13,7 +13,7 @@ void main() {
       ),
     );
     await tester.pump();
-    expect(find.text('AI Subtitle Studio'), findsOneWidget);
+    expect(find.text('AI Sub Mini'), findsOneWidget);
     expect(find.byType(HomeScreen), findsOneWidget);
   });
 }

@@ -24,6 +24,9 @@ class JobScheduler {
   final OfflineTranslationEngine _translationEngine = OfflineTranslationEngine();
   final SubtitleSplittingService _splittingService = const SubtitleSplittingService();
 
+  final StreamController<ProcessingJob> _jobStreamController = StreamController<ProcessingJob>.broadcast();
+  Stream<ProcessingJob> get jobStream => _jobStreamController.stream;
+
   bool _isProcessing = false;
 
   void triggerQueueProcessing({UserSettings? settings}) {
@@ -45,7 +48,7 @@ class JobScheduler {
       final job = queued.first;
       await _executeJob(job, settings);
 
-      // Loop to next
+      // Loop to process next queued job
       await _processNextJob(settings);
     } catch (e) {
       _isProcessing = false;
@@ -56,40 +59,39 @@ class JobScheduler {
     try {
       final project = await _db.getProject(job.projectId);
       if (project == null) {
-        await _db.saveJob(job.copyWith(
+        final failed = job.copyWith(
           stage: JobStage.failed,
-          errorDetails: 'Project not found.',
-        ));
+          errorDetails: 'Project metadata not found.',
+        );
+        await _db.saveJob(failed);
+        _jobStreamController.add(failed);
         return;
       }
 
-      // Step 1: Extract Audio
-      await _updateJob(job, JobStage.extractingAudio, 0.1, 'Extracting 16kHz audio track...');
+      // Step 1: Extract Audio track (16kHz 16-bit mono WAV)
+      await _updateJob(job, JobStage.extractingAudio, 0.15, 'Extracting 16kHz audio track from media...');
       String audioPath = project.audioPath ?? '';
       if (audioPath.isEmpty || !File(audioPath).existsSync()) {
         if (project.mediaPath != null && File(project.mediaPath!).existsSync()) {
           final extractedFile = await _audioExtractor.extractAudio(
             inputPath: project.mediaPath!,
+            knownDurationMs: project.durationMs,
             onProgress: (p, s) {
-              _updateJob(job, JobStage.extractingAudio, 0.1 + (p * 0.2), s);
+              _updateJob(job, JobStage.extractingAudio, 0.15 + (p * 0.15), s);
             },
           );
           audioPath = extractedFile.path;
           await _db.saveProject(project.copyWith(audioPath: audioPath));
         } else {
-          throw Exception('No valid media file found to process.');
+          throw Exception('Media file could not be accessed.');
         }
       }
 
-      // Step 2: Speech Transcription (Whisper)
-      await _updateJob(job, JobStage.transcribing, 0.35, 'Initializing speech model...');
+      // Step 2: Speech-to-Text Transcription
+      await _updateJob(job, JobStage.transcribing, 0.35, 'Initializing speech transcription engine...');
       final models = await _modelManager.getModelsWithStatus();
-      final installedModel = models.firstWhere(
-        (m) => m.isInstalled,
-        orElse: () => models.firstWhere((m) => m.id == 'tiny'),
-      );
-
-      final modelPath = installedModel.localPath ?? '';
+      final installedList = models.where((m) => m.isInstalled).toList();
+      final modelPath = installedList.isNotEmpty ? (installedList.first.localPath ?? '') : '';
 
       final rawCues = await _whisperEngine.transcribe(
         audioPath: audioPath,
@@ -102,12 +104,12 @@ class JobScheduler {
         },
       );
 
-      // Step 3: Optional Translation
+      // Step 3: Neural Translation (if user requested translation)
       List<SubtitleCue> cuesToFormat = rawCues;
       if (project.targetLanguage != null &&
           project.targetLanguage!.isNotEmpty &&
           project.targetLanguage != project.sourceLanguage) {
-        await _updateJob(job, JobStage.translating, 0.75, 'Translating subtitles...');
+        await _updateJob(job, JobStage.translating, 0.75, 'Translating subtitles to ${project.targetLanguage}...');
         cuesToFormat = await _translationEngine.translateCues(
           cues: rawCues,
           sourceLang: project.sourceLanguage,
@@ -118,8 +120,8 @@ class JobScheduler {
         );
       }
 
-      // Step 4: Formatting & Masking
-      await _updateJob(job, JobStage.formatting, 0.92, 'Formatting subtitle cues and timing...');
+      // Step 4: Formatting, Sentence Boundary Splitting & Profanity Filter
+      await _updateJob(job, JobStage.formatting, 0.92, 'Formatting subtitle cues and timing alignment...');
       final splitCues = _splittingService.splitCues(cuesToFormat);
 
       // Apply profanity mask
@@ -129,26 +131,32 @@ class JobScheduler {
         placeholder: settings.censorPlaceholder,
       );
 
-      // Save cues into database
+      // Save generated cues into database
       await _db.replaceCuesForProject(project.id, finalCues);
 
-      // Step 5: Mark Completed
+      // Step 5: Mark Project & Job Completed
       await _db.saveProject(project.copyWith(
         status: ProjectStatus.ready,
         cueCount: finalCues.length,
+        updatedAt: DateTime.now(),
       ));
 
-      await _db.saveJob(job.copyWith(
+      final completedJob = job.copyWith(
         stage: JobStage.completed,
         progress: 1.0,
-        currentStep: 'Completed',
+        currentStep: 'Transcription & formatting completed (${finalCues.length} cues)',
         completedAt: DateTime.now(),
-      ));
+      );
+      await _db.saveJob(completedJob);
+      _jobStreamController.add(completedJob);
     } catch (e) {
-      await _db.saveJob(job.copyWith(
+      final failedJob = job.copyWith(
         stage: JobStage.failed,
         errorDetails: e.toString(),
-      ));
+        currentStep: 'Failed: ${e.toString()}',
+      );
+      await _db.saveJob(failedJob);
+      _jobStreamController.add(failedJob);
     }
   }
 
@@ -159,28 +167,33 @@ class JobScheduler {
       currentStep: step,
     );
     await _db.saveJob(updated);
+    _jobStreamController.add(updated);
   }
 
   Future<void> cancelJob(String jobId) async {
     final job = await _db.getJob(jobId);
     if (job != null) {
-      await _db.saveJob(job.copyWith(
+      final cancelled = job.copyWith(
         stage: JobStage.cancelled,
         currentStep: 'Job cancelled by user',
-      ));
+      );
+      await _db.saveJob(cancelled);
+      _jobStreamController.add(cancelled);
     }
   }
 
   Future<void> retryJob(String jobId) async {
     final job = await _db.getJob(jobId);
     if (job != null) {
-      await _db.saveJob(job.copyWith(
+      final retried = job.copyWith(
         stage: JobStage.queued,
         progress: 0.0,
-        currentStep: 'Queued for retry',
+        currentStep: 'Queued for processing',
         retryCount: job.retryCount + 1,
         errorDetails: null,
-      ));
+      );
+      await _db.saveJob(retried);
+      _jobStreamController.add(retried);
       triggerQueueProcessing();
     }
   }

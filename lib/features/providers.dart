@@ -100,9 +100,33 @@ final projectsProvider = AsyncNotifierProvider<ProjectsNotifier, List<Project>>(
 // --- JOBS NOTIFIER ---
 class JobsNotifier extends AsyncNotifier<List<ProcessingJob>> {
   final AppDatabase _db = AppDatabase();
+  StreamSubscription<ProcessingJob>? _sub;
 
   @override
   FutureOr<List<ProcessingJob>> build() async {
+    _sub?.cancel();
+    _sub = JobScheduler().jobStream.listen((job) {
+      if (state.hasValue) {
+        final current = state.value!;
+        final idx = current.indexWhere((j) => j.id == job.id);
+        List<ProcessingJob> updated;
+        if (idx != -1) {
+          updated = List<ProcessingJob>.from(current);
+          updated[idx] = job;
+        } else {
+          updated = [job, ...current];
+        }
+        state = AsyncValue.data(updated);
+      }
+      if (job.stage == JobStage.completed) {
+        ref.read(projectsProvider.notifier).loadProjects();
+      }
+    });
+
+    ref.onDispose(() {
+      _sub?.cancel();
+    });
+
     return await _db.getAllJobs();
   }
 

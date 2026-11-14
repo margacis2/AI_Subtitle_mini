@@ -4,15 +4,15 @@ import '../features/providers.dart';
 import 'router.dart';
 import 'theme/app_theme.dart';
 
-class AISubtitleStudioApp extends ConsumerWidget {
-  const AISubtitleStudioApp({super.key});
+class AISubMiniApp extends ConsumerWidget {
+  const AISubMiniApp({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final settings = ref.watch(settingsProvider);
 
     return MaterialApp.router(
-      title: 'AI Subtitle Studio',
+      title: 'AI Sub Mini',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
       darkTheme: AppTheme.darkTheme,

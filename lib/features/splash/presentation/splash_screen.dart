@@ -77,7 +77,7 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
                 ),
                 const SizedBox(height: 24),
                 Text(
-                  'AI Subtitle Studio',
+                  'AI Sub Mini',
                   style: theme.textTheme.headlineMedium?.copyWith(
                     fontWeight: FontWeight.bold,
                     letterSpacing: -0.5,
