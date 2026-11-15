@@ -44,6 +44,37 @@ class _SubtitleEditorScreenState extends ConsumerState<SubtitleEditorScreen> {
   bool _isFullscreen = false;
   int? _lastActiveCueIndex;
 
+  final List<List<SubtitleCue>> _undoStack = [];
+  final List<List<SubtitleCue>> _redoStack = [];
+
+  void _recordHistory() {
+    _undoStack.add(_cues.map((c) => c.copyWith()).toList());
+    if (_undoStack.length > 50) {
+      _undoStack.removeAt(0);
+    }
+    _redoStack.clear();
+  }
+
+  void _undo() {
+    if (_undoStack.isEmpty) return;
+    _redoStack.add(_cues.map((c) => c.copyWith()).toList());
+    final previous = _undoStack.removeLast();
+    setState(() {
+      _cues = previous;
+    });
+    _saveCues(record: false);
+  }
+
+  void _redo() {
+    if (_redoStack.isEmpty) return;
+    _undoStack.add(_cues.map((c) => c.copyWith()).toList());
+    final next = _redoStack.removeLast();
+    setState(() {
+      _cues = next;
+    });
+    _saveCues(record: false);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -133,12 +164,14 @@ class _SubtitleEditorScreenState extends ConsumerState<SubtitleEditorScreen> {
     return null;
   }
 
-  Future<void> _saveCues() async {
+  Future<void> _saveCues({bool record = false}) async {
+    if (record) _recordHistory();
     await _db.replaceCuesForProject(widget.projectId, _cues);
     ref.read(projectsProvider.notifier).loadProjects();
   }
 
   void _addNewCue() {
+    _recordHistory();
     final lastEnd = _cues.isNotEmpty ? _cues.last.endMs + 200 : 0;
     final newCue = SubtitleCue(
       projectId: widget.projectId,
@@ -162,6 +195,61 @@ class _SubtitleEditorScreenState extends ConsumerState<SubtitleEditorScreen> {
         );
       }
     });
+  }
+
+  void _splitCue(int index) {
+    if (index < 0 || index >= _cues.length) return;
+    _recordHistory();
+    final cue = _cues[index];
+    final midMs = cue.startMs + (cue.endMs - cue.startMs) ~/ 2;
+
+    final words = cue.text.split(' ');
+    String part1 = cue.text;
+    String part2 = '...';
+    if (words.length > 1) {
+      final mid = (words.length / 2).ceil();
+      part1 = words.sublist(0, mid).join(' ');
+      part2 = words.sublist(mid).join(' ');
+    }
+
+    final cue1 = cue.copyWith(endMs: midMs, text: part1);
+    final cue2 = SubtitleCue(
+      projectId: cue.projectId,
+      cueIndex: cue.cueIndex + 1,
+      startMs: midMs,
+      endMs: cue.endMs,
+      text: part2,
+    );
+
+    setState(() {
+      _cues[index] = cue1;
+      _cues.insert(index + 1, cue2);
+      for (int i = 0; i < _cues.length; i++) {
+        _cues[i] = _cues[i].copyWith(cueIndex: i + 1);
+      }
+    });
+    _saveCues();
+  }
+
+  void _mergeWithNextCue(int index) {
+    if (index < 0 || index >= _cues.length - 1) return;
+    _recordHistory();
+    final current = _cues[index];
+    final next = _cues[index + 1];
+
+    final merged = current.copyWith(
+      endMs: next.endMs,
+      text: '${current.text} ${next.text}'.trim(),
+    );
+
+    setState(() {
+      _cues[index] = merged;
+      _cues.removeAt(index + 1);
+      for (int i = 0; i < _cues.length; i++) {
+        _cues[i] = _cues[i].copyWith(cueIndex: i + 1);
+      }
+    });
+    _saveCues();
   }
 
   void _editCueDialog(SubtitleCue cue, int index) {
@@ -207,6 +295,7 @@ class _SubtitleEditorScreenState extends ConsumerState<SubtitleEditorScreen> {
           TextButton(
             onPressed: () {
               Navigator.pop(ctx);
+              _recordHistory();
               setState(() {
                 _cues.removeAt(index);
                 for (int i = 0; i < _cues.length; i++) {
@@ -221,6 +310,7 @@ class _SubtitleEditorScreenState extends ConsumerState<SubtitleEditorScreen> {
             onPressed: () {
               final newStart = TimestampUtils.parseSrt(startCtrl.text);
               final newEnd = TimestampUtils.parseSrt(endCtrl.text);
+              _recordHistory();
               setState(() {
                 _cues[index] = cue.copyWith(
                   text: textCtrl.text.trim(),
@@ -281,6 +371,7 @@ class _SubtitleEditorScreenState extends ConsumerState<SubtitleEditorScreen> {
               onPressed: () {
                 final ms = int.tryParse(shiftCtrl.text) ?? 0;
                 final delta = shiftForward ? ms : -ms;
+                _recordHistory();
                 setState(() {
                   _cues = _cues.map((c) {
                     return c.copyWith(
@@ -433,6 +524,16 @@ class _SubtitleEditorScreenState extends ConsumerState<SubtitleEditorScreen> {
           : AppBar(
               title: Text(_project?.name ?? 'Subtitle Editor', maxLines: 1, overflow: TextOverflow.ellipsis),
               actions: [
+                IconButton(
+                  icon: const Icon(Icons.undo_rounded),
+                  tooltip: 'Undo',
+                  onPressed: _undoStack.isNotEmpty ? _undo : null,
+                ),
+                IconButton(
+                  icon: const Icon(Icons.redo_rounded),
+                  tooltip: 'Redo',
+                  onPressed: _redoStack.isNotEmpty ? _redo : null,
+                ),
                 IconButton(
                   icon: const Icon(Icons.style_outlined),
                   tooltip: 'Subtitle Styling',
@@ -903,6 +1004,57 @@ class _SubtitleEditorScreenState extends ConsumerState<SubtitleEditorScreen> {
                     tooltip: 'Edit cue',
                     visualDensity: VisualDensity.compact,
                     onPressed: () => _editCueDialog(cue, index),
+                  ),
+                  PopupMenuButton<String>(
+                    icon: const Icon(Icons.more_vert_rounded, size: 18),
+                    tooltip: 'Cue Actions',
+                    onSelected: (val) {
+                      if (val == 'split') _splitCue(index);
+                      if (val == 'merge') _mergeWithNextCue(index);
+                      if (val == 'delete') {
+                        _recordHistory();
+                        setState(() {
+                          _cues.removeAt(index);
+                          for (int i = 0; i < _cues.length; i++) {
+                            _cues[i] = _cues[i].copyWith(cueIndex: i + 1);
+                          }
+                        });
+                        _saveCues();
+                      }
+                    },
+                    itemBuilder: (ctx) => [
+                      const PopupMenuItem(
+                        value: 'split',
+                        child: Row(
+                          children: [
+                            Icon(Icons.call_split_rounded, size: 18),
+                            SizedBox(width: 8),
+                            Text('Split Cue'),
+                          ],
+                        ),
+                      ),
+                      if (index < _cues.length - 1)
+                        const PopupMenuItem(
+                          value: 'merge',
+                          child: Row(
+                            children: [
+                              Icon(Icons.merge_type_rounded, size: 18),
+                              SizedBox(width: 8),
+                              Text('Merge with Next'),
+                            ],
+                          ),
+                        ),
+                      const PopupMenuItem(
+                        value: 'delete',
+                        child: Row(
+                          children: [
+                            Icon(Icons.delete_outline_rounded, size: 18, color: Colors.redAccent),
+                            SizedBox(width: 8),
+                            Text('Delete Cue', style: TextStyle(color: Colors.redAccent)),
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),

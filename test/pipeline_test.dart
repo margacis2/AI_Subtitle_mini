@@ -1,6 +1,8 @@
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ai_subtitle_studio/domain/entities/processing_job.dart';
+import 'package:ai_subtitle_studio/domain/entities/project.dart';
 import 'package:ai_subtitle_studio/domain/entities/subtitle_cue.dart';
 import 'package:ai_subtitle_studio/native/media/audio_extractor.dart';
 import 'package:ai_subtitle_studio/native/translation/onnx_translation_engine.dart';
@@ -151,6 +153,37 @@ void main() {
       expect(translatedCue.id, equals(1));
       expect(translatedCue.originalText, equals('Original dialogue'));
       expect(translatedCue.text, equals('Translated dialogue'));
+    });
+
+    test('Project and ProcessingJob persist and serialize selectedModel correctly', () {
+      final project = Project(
+        id: 'p_1',
+        name: 'Model Test',
+        createdAt: DateTime(2026, 1, 1),
+        updatedAt: DateTime(2026, 1, 1),
+        selectedModel: 'medium',
+      );
+
+      final map = project.toMap();
+      expect(map['selected_model'], equals('medium'));
+
+      final fromMap = Project.fromMap(map);
+      expect(fromMap.selectedModel, equals('medium'));
+
+      final job = ProcessingJob(
+        id: 'j_1',
+        projectId: 'p_1',
+        title: 'Job Test',
+        stage: JobStage.queued,
+        createdAt: DateTime(2026, 1, 1),
+        selectedModel: 'small',
+      );
+
+      final jobMap = job.toMap();
+      expect(jobMap['selected_model'], equals('small'));
+
+      final jobFromMap = ProcessingJob.fromMap(jobMap);
+      expect(jobFromMap.selectedModel, equals('small'));
     });
   });
 }

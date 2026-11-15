@@ -89,15 +89,21 @@ class JobScheduler {
       }
 
       // Step 2: Speech-to-Text Transcription
-      await _updateJob(job, JobStage.transcribing, 0.35, 'Initializing speech transcription engine...');
+      final selectedModelId = job.selectedModel.isNotEmpty ? job.selectedModel : project.selectedModel;
+      await _updateJob(job, JobStage.transcribing, 0.35, 'Verifying Whisper ${selectedModelId.toUpperCase()} model...');
+      
       final models = await _modelManager.getModelsWithStatus();
-      final installedList = models.where((m) => m.isInstalled).toList();
-      if (installedList.isEmpty) {
+      final matchingModel = models.where((m) => m.id.toLowerCase() == selectedModelId.toLowerCase()).firstOrNull;
+      
+      if (matchingModel == null || !matchingModel.isInstalled || matchingModel.localPath == null || !File(matchingModel.localPath!).existsSync()) {
         throw StateError(
-          'No Whisper model installed. Please download a model (e.g. Tiny or Base) in the Model Library before starting transcription.',
+          'Whisper ${selectedModelId.toUpperCase()} model is not installed locally. '
+          'Please download the ${selectedModelId.toUpperCase()} model in the Model Library before starting transcription.',
         );
       }
-      final modelPath = installedList.first.localPath ?? '';
+      final modelPath = matchingModel.localPath!;
+
+      await _updateJob(job, JobStage.transcribing, 0.38, 'Loading ${matchingModel.displayName} into memory...');
 
       final rawCues = await _whisperEngine.transcribe(
         audioPath: audioPath,
@@ -106,7 +112,7 @@ class JobScheduler {
         language: project.sourceLanguage,
         threadCount: settings.threadCount,
         onProgress: (p, s) {
-          _updateJob(job, JobStage.transcribing, 0.35 + (p * 0.35), s);
+          _updateJob(job, JobStage.transcribing, 0.40 + (p * 0.32), s);
         },
       );
 

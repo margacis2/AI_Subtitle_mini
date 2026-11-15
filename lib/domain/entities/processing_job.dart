@@ -53,6 +53,7 @@ class ProcessingJob extends Equatable {
   final String? inputPath;
   final String? outputPath;
   final String? settings;
+  final String selectedModel;
 
   const ProcessingJob({
     required this.id,
@@ -68,6 +69,7 @@ class ProcessingJob extends Equatable {
     this.inputPath,
     this.outputPath,
     this.settings,
+    this.selectedModel = 'base',
   });
 
   ProcessingJob copyWith({
@@ -84,6 +86,7 @@ class ProcessingJob extends Equatable {
     String? inputPath,
     String? outputPath,
     String? settings,
+    String? selectedModel,
   }) {
     return ProcessingJob(
       id: id ?? this.id,
@@ -99,6 +102,7 @@ class ProcessingJob extends Equatable {
       inputPath: inputPath ?? this.inputPath,
       outputPath: outputPath ?? this.outputPath,
       settings: settings ?? this.settings,
+      selectedModel: selectedModel ?? this.selectedModel,
     );
   }
 
@@ -117,6 +121,7 @@ class ProcessingJob extends Equatable {
       'input_path': inputPath,
       'output_path': outputPath,
       'settings': settings,
+      'selected_model': selectedModel,
     };
   }
 
@@ -142,6 +147,7 @@ class ProcessingJob extends Equatable {
       inputPath: map['input_path'] as String?,
       outputPath: map['output_path'] as String?,
       settings: map['settings'] as String?,
+      selectedModel: map['selected_model'] as String? ?? 'base',
     );
   }
 
@@ -160,5 +166,6 @@ class ProcessingJob extends Equatable {
         inputPath,
         outputPath,
         settings,
+        selectedModel,
       ];
 }

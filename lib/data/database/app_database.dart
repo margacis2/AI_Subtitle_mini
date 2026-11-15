@@ -25,9 +25,19 @@ class AppDatabase {
 
     return await openDatabase(
       dbPath,
-      version: 1,
+      version: 2,
       onConfigure: (db) async {
         await db.execute('PRAGMA foreign_keys = ON');
+      },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          try {
+            await db.execute("ALTER TABLE projects ADD COLUMN selected_model TEXT DEFAULT 'base'");
+          } catch (_) {}
+          try {
+            await db.execute("ALTER TABLE processing_jobs ADD COLUMN selected_model TEXT DEFAULT 'base'");
+          } catch (_) {}
+        }
       },
       onCreate: (db, version) async {
         await db.execute('''
@@ -43,6 +53,7 @@ class AppDatabase {
             target_language TEXT,
             cue_count INTEGER NOT NULL DEFAULT 0,
             duration_ms INTEGER,
+            selected_model TEXT DEFAULT 'base',
             status TEXT NOT NULL
           )
         ''');
@@ -88,7 +99,8 @@ class AppDatabase {
             retry_count INTEGER NOT NULL DEFAULT 0,
             input_path TEXT,
             output_path TEXT,
-            settings TEXT
+            settings TEXT,
+            selected_model TEXT DEFAULT 'base'
           )
         ''');
 

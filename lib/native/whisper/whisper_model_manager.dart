@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -82,7 +83,15 @@ class WhisperModelManager {
     }
     await tempFile.rename(targetFile.path);
 
-    onProgress(0.98, 'Verifying model integrity...');
+    onProgress(0.97, 'Verifying model integrity (SHA-256)...');
+    if (model.sha256 != null && model.sha256!.isNotEmpty) {
+      final digest = await sha256.bind(targetFile.openRead()).first;
+      final hashStr = digest.toString().toLowerCase();
+      if (hashStr != model.sha256!.toLowerCase()) {
+        await targetFile.delete();
+        throw Exception('SHA-256 verification failed. Expected ${model.sha256}, got $hashStr. Corrupted file deleted.');
+      }
+    }
 
     // Save to database
     await _db.recordModelInstallation(

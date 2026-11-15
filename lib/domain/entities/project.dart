@@ -38,6 +38,7 @@ class Project extends Equatable {
   final String? targetLanguage;
   final int cueCount;
   final int? durationMs;
+  final String selectedModel;
   final ProjectStatus status;
 
   const Project({
@@ -52,6 +53,7 @@ class Project extends Equatable {
     this.targetLanguage,
     this.cueCount = 0,
     this.durationMs,
+    this.selectedModel = 'base',
     this.status = ProjectStatus.ready,
   });
 
@@ -67,6 +69,7 @@ class Project extends Equatable {
     String? targetLanguage,
     int? cueCount,
     int? durationMs,
+    String? selectedModel,
     ProjectStatus? status,
   }) {
     return Project(
@@ -81,6 +84,7 @@ class Project extends Equatable {
       targetLanguage: targetLanguage ?? this.targetLanguage,
       cueCount: cueCount ?? this.cueCount,
       durationMs: durationMs ?? this.durationMs,
+      selectedModel: selectedModel ?? this.selectedModel,
       status: status ?? this.status,
     );
   }
@@ -98,6 +102,7 @@ class Project extends Equatable {
       'target_language': targetLanguage,
       'cue_count': cueCount,
       'duration_ms': durationMs,
+      'selected_model': selectedModel,
       'status': status.name,
     };
   }
@@ -122,6 +127,7 @@ class Project extends Equatable {
       targetLanguage: map['target_language'] as String?,
       cueCount: map['cue_count'] as int? ?? 0,
       durationMs: map['duration_ms'] as int?,
+      selectedModel: map['selected_model'] as String? ?? 'base',
       status: parseStatus(map['status'] as String?),
     );
   }
@@ -139,6 +145,7 @@ class Project extends Equatable {
         targetLanguage,
         cueCount,
         durationMs,
+        selectedModel,
         status,
       ];
 }

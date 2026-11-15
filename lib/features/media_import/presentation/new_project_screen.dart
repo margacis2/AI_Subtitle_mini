@@ -120,15 +120,18 @@ class _NewProjectScreenState extends ConsumerState<NewProjectScreen> {
     // Verify Whisper model before starting speech recognition
     if (_selectedMediaPath != null) {
       final models = await ref.read(whisperModelsProvider.future);
-      final hasInstalled = models.any((m) => m.isInstalled);
-      if (!hasInstalled) {
+      final chosen = models.where((m) => m.id == _selectedModel).firstOrNull;
+      if (chosen == null || !chosen.isInstalled) {
         if (!mounted) return;
+        final modelName = chosen?.displayName ?? 'Whisper ${_selectedModel.toUpperCase()}';
         final goToModels = await showDialog<bool>(
           context: context,
           builder: (ctx) => AlertDialog(
-            title: const Text('Whisper Model Required'),
-            content: const Text(
-              'No Whisper model is installed locally. You must download at least one model (e.g. Tiny or Base) in the Model Library before starting speech recognition.',
+            title: Text('$modelName Required'),
+            content: Text(
+              '$modelName is not downloaded on this device.\n\n'
+              'AI Sub Mini uses 100% genuine on-device speech recognition without cloud servers or fake estimates. '
+              'Please download $modelName (${chosen?.formattedSize ?? 'required'}) in the Model Library before starting transcription.',
             ),
             actions: [
               TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
@@ -181,6 +184,7 @@ class _NewProjectScreenState extends ConsumerState<NewProjectScreen> {
           targetLanguage: _targetLanguage,
           cueCount: cues.length,
           durationMs: _mediaMetadata?.durationMs,
+          selectedModel: _selectedModel,
           status: ProjectStatus.ready,
         );
 
@@ -204,6 +208,7 @@ class _NewProjectScreenState extends ConsumerState<NewProjectScreen> {
         targetLanguage: _targetLanguage,
         cueCount: 0,
         durationMs: _mediaMetadata?.durationMs,
+        selectedModel: _selectedModel,
         status: ProjectStatus.transcribing,
       );
 
@@ -216,7 +221,8 @@ class _NewProjectScreenState extends ConsumerState<NewProjectScreen> {
         stage: JobStage.queued,
         createdAt: now,
         inputPath: _selectedMediaPath,
-        currentStep: 'Queued for processing...',
+        selectedModel: _selectedModel,
+        currentStep: 'Queued for processing (${_selectedModel.toUpperCase()})...',
       );
 
       await ref.read(jobsProvider.notifier).addJob(job);
@@ -521,52 +527,88 @@ class _NewProjectScreenState extends ConsumerState<NewProjectScreen> {
                 loading: () => const LinearProgressIndicator(),
                 error: (_, _) => const SizedBox.shrink(),
                 data: (models) {
+                  final selectedModelObj = models.where((m) => m.id == _selectedModel).firstOrNull;
+                  final isMissing = selectedModelObj != null && !selectedModelObj.isInstalled;
+
                   return Column(
-                    children: models.map((m) {
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: RadioListTile<String>(
-                          value: m.id,
-                          groupValue: _selectedModel,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(14),
-                            side: BorderSide(
-                              color: _selectedModel == m.id
-                                  ? theme.colorScheme.primary
-                                  : theme.colorScheme.outline,
-                              width: _selectedModel == m.id ? 1.8 : 1,
+                    children: [
+                      ...models.map((m) {
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: RadioListTile<String>(
+                            value: m.id,
+                            groupValue: _selectedModel,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14),
+                              side: BorderSide(
+                                color: _selectedModel == m.id
+                                    ? theme.colorScheme.primary
+                                    : theme.colorScheme.outline,
+                                width: _selectedModel == m.id ? 1.8 : 1,
+                              ),
                             ),
-                          ),
-                          title: Row(
-                            children: [
-                              Text(m.displayName, style: const TextStyle(fontWeight: FontWeight.bold)),
-                              const SizedBox(width: 8),
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: m.isInstalled
-                                      ? const Color(0xFF10B981).withAlpha(40)
-                                      : theme.colorScheme.surfaceContainerHighest,
-                                  borderRadius: BorderRadius.circular(6),
-                                ),
-                                child: Text(
-                                  m.isInstalled ? 'Ready' : m.formattedSize,
-                                  style: TextStyle(
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.bold,
-                                    color: m.isInstalled ? const Color(0xFF10B981) : theme.colorScheme.onSurfaceVariant,
+                            title: Row(
+                              children: [
+                                Text(m.displayName, style: const TextStyle(fontWeight: FontWeight.bold)),
+                                const SizedBox(width: 8),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: m.isInstalled
+                                        ? const Color(0xFF10B981).withAlpha(40)
+                                        : theme.colorScheme.surfaceContainerHighest,
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                  child: Text(
+                                    m.isInstalled ? 'Ready' : m.formattedSize,
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold,
+                                      color: m.isInstalled ? const Color(0xFF10B981) : theme.colorScheme.onSurfaceVariant,
+                                    ),
                                   ),
                                 ),
+                              ],
+                            ),
+                            subtitle: Text('RAM: ${m.ramRequirement} • Offline inference'),
+                            onChanged: (val) {
+                              if (val != null) setState(() => _selectedModel = val);
+                            },
+                          ),
+                        );
+                      }),
+                      if (isMissing)
+                        Container(
+                          margin: const EdgeInsets.only(top: 8),
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: theme.colorScheme.errorContainer.withAlpha(80),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: theme.colorScheme.error.withAlpha(120)),
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(Icons.info_outline_rounded, color: theme.colorScheme.error, size: 20),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  '${selectedModelObj.displayName} is not downloaded yet (${selectedModelObj.formattedSize}). Genuine AI speech recognition requires downloading this model first.',
+                                  style: TextStyle(fontSize: 12, color: theme.colorScheme.onErrorContainer),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              FilledButton.tonal(
+                                onPressed: () => context.push('/models'),
+                                style: FilledButton.styleFrom(
+                                  visualDensity: VisualDensity.compact,
+                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                ),
+                                child: const Text('Download', style: TextStyle(fontSize: 12)),
                               ),
                             ],
                           ),
-                          subtitle: Text('RAM: ${m.ramRequirement} • Offline inference'),
-                          onChanged: (val) {
-                            if (val != null) setState(() => _selectedModel = val);
-                          },
                         ),
-                      );
-                    }).toList(),
+                    ],
                   );
                 },
               ),
