@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
 
 import '../../../core/utilities/timestamp_utils.dart';
 import '../../../data/serializers/ass_serializer.dart';
@@ -13,6 +12,7 @@ import '../../../data/serializers/txt_serializer.dart';
 import '../../../data/serializers/vtt_serializer.dart';
 import '../../../domain/entities/subtitle_cue.dart';
 import '../../../domain/entities/translation_pack_info.dart';
+import '../../../domain/services/subtitle_export_service.dart';
 import '../../../native/translation/onnx_translation_engine.dart';
 import '../../providers.dart';
 
@@ -135,6 +135,9 @@ class _TranslateScreenState extends ConsumerState<TranslateScreen> with SingleTi
     }
   }
 
+  int _successfulCuesCount = 0;
+  int _failedCuesCount = 0;
+
   // --- 2. Start Neural Batch Translation ---
   Future<void> _startSubtitleTranslation(TranslationPackInfo? installedPack) async {
     if (_sourceCues.isEmpty) return;
@@ -155,6 +158,8 @@ class _TranslateScreenState extends ConsumerState<TranslateScreen> with SingleTi
       _isTranslatingSubtitles = true;
       _cancelRequested = false;
       _translationProgress = 0.0;
+      _successfulCuesCount = 0;
+      _failedCuesCount = 0;
       _translationStatus = 'Initializing ONNX neural model...';
     });
 
@@ -165,51 +170,74 @@ class _TranslateScreenState extends ConsumerState<TranslateScreen> with SingleTi
       for (int i = 0; i < total; i++) {
         if (_cancelRequested) {
           setState(() {
-            _translationStatus = 'Translation cancelled by user.';
+            _translationStatus = 'Translation cancelled by user ($_successfulCuesCount/$total translated).';
             _isTranslatingSubtitles = false;
           });
           return;
         }
 
         final cue = _sourceCues[i];
-        final translatedText = await OnnxTranslationEngine().translateText(
-          text: cue.text,
-          sourceLang: _sourceLang,
-          targetLang: _targetLang,
-          packLocalPath: installedPack.localPath,
-        );
+        setState(() {
+          _translationStatus = 'Running neural inference on cue ${i + 1} of $total...';
+          _translationProgress = i / total;
+        });
 
-        // Strictly preserve timestamps and cue ordering
-        result.add(cue.copyWith(
-          text: translatedText,
-          originalText: cue.originalText ?? cue.text,
-        ));
+        try {
+          final translatedText = await OnnxTranslationEngine().translateText(
+            text: cue.text,
+            sourceLang: _sourceLang,
+            targetLang: _targetLang,
+            packLocalPath: installedPack.localPath,
+            cueIndex: cue.cueIndex,
+          );
+
+          // Strictly preserve timestamps and cue ordering
+          result.add(cue.copyWith(
+            text: translatedText,
+            originalText: cue.originalText ?? cue.text,
+          ));
+          _successfulCuesCount++;
+        } catch (cueErr) {
+          _failedCuesCount++;
+          debugPrint('Translation error on cue #${cue.cueIndex}: $cueErr');
+          throw TranslationException(
+            message: 'Failed translating cue #${cue.cueIndex} ("${cue.text}"): $cueErr',
+            sourceLang: _sourceLang,
+            targetLang: _targetLang,
+            cueIndex: cue.cueIndex,
+          );
+        }
 
         setState(() {
           _translationProgress = (i + 1) / total;
-          _translationStatus = 'Translating cue ${i + 1} of $total...';
+          _translationStatus = 'Translated ${i + 1} of $total cues...';
           _translatedCues = List.from(result);
         });
       }
 
       setState(() {
         _isTranslatingSubtitles = false;
-        _translationStatus = 'Translation completed ($total cues translated).';
+        _translationStatus = 'Translation completed: $_successfulCuesCount cues translated.';
       });
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Neural translation completed successfully!')),
+          SnackBar(content: Text('Successfully translated $_successfulCuesCount cues to $_targetLang!')),
         );
       }
     } catch (e) {
+      _failedCuesCount = total - _successfulCuesCount;
       setState(() {
         _isTranslatingSubtitles = false;
-        _translationStatus = 'Error during translation: $e';
+        _translationStatus = 'Error during translation ($_failedCuesCount remaining failed): $e';
       });
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Translation error: $e')),
+          SnackBar(
+            content: Text('Translation error: $e'),
+            backgroundColor: Colors.redAccent,
+            duration: const Duration(seconds: 6),
+          ),
         );
       }
     }
@@ -217,55 +245,38 @@ class _TranslateScreenState extends ConsumerState<TranslateScreen> with SingleTi
 
   // --- 3. Export Subtitles ---
   Future<void> _exportSubtitles(String format) async {
-    final cues = _translatedCues.isNotEmpty ? _translatedCues : _sourceCues;
-    if (cues.isEmpty) {
+    if (_translatedCues.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No subtitle cues available to export.')),
+        const SnackBar(
+          content: Text('No translated subtitles are available. Complete translation first.'),
+          backgroundColor: Colors.orangeAccent,
+        ),
       );
       return;
     }
 
     try {
-      String serialized;
-      String extension;
-
-      switch (format.toLowerCase()) {
-        case 'vtt':
-          serialized = VttSerializer.serialize(cues);
-          extension = 'vtt';
-          break;
-        case 'ass':
-          serialized = AssSerializer.serialize(cues);
-          extension = 'ass';
-          break;
-        case 'srt':
-        default:
-          serialized = SrtSerializer.serialize(cues);
-          extension = 'srt';
-          break;
-      }
-
+      final settings = ref.read(settingsProvider);
       final baseName = _importedFileName != null
           ? p.basenameWithoutExtension(_importedFileName!)
           : 'subtitles';
-      final fileName = '${baseName}_translated_$_targetLang.$extension';
+      final projectName = '${baseName}_translated_$_targetLang';
 
-      Directory exportDir;
-      try {
-        final downloads = await getDownloadsDirectory();
-        exportDir = downloads ?? await getApplicationDocumentsDirectory();
-      } catch (_) {
-        exportDir = await getApplicationDocumentsDirectory();
-      }
-
-      final outFile = File(p.join(exportDir.path, fileName));
-      await outFile.writeAsString(serialized);
+      final result = await SubtitleExportService.exportToFile(
+        projectName: projectName,
+        cues: _translatedCues,
+        format: format,
+        saveToPublicDownloads: settings.exportToPublicDownloads,
+        customTreeUri: settings.customExportDirectoryUri,
+      );
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Exported to: ${outFile.path}'),
-            duration: const Duration(seconds: 5),
+            content: Text(
+              'Successfully exported ${result.cueCount} translated cues (${result.format}) to:\n${result.pathOrUri}',
+            ),
+            duration: const Duration(seconds: 6),
             action: SnackBarAction(
               label: 'OK',
               onPressed: () {},
@@ -276,7 +287,10 @@ class _TranslateScreenState extends ConsumerState<TranslateScreen> with SingleTi
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Export failed: $e')),
+          SnackBar(
+            content: Text('Export failed: $e'),
+            backgroundColor: Colors.redAccent,
+          ),
         );
       }
     }

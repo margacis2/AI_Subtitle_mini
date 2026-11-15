@@ -28,6 +28,8 @@ class UserSettings {
   final String selectedModelId;
   final int threadCount;
   final bool exportToPublicDownloads;
+  final String? customExportDirectoryUri;
+  final String? customExportDirectoryName;
 
   const UserSettings({
     this.themeMode = ThemeMode.dark,
@@ -37,6 +39,8 @@ class UserSettings {
     this.selectedModelId = 'base',
     this.threadCount = 4,
     this.exportToPublicDownloads = true,
+    this.customExportDirectoryUri,
+    this.customExportDirectoryName,
   });
 
   UserSettings copyWith({
@@ -47,6 +51,9 @@ class UserSettings {
     String? selectedModelId,
     int? threadCount,
     bool? exportToPublicDownloads,
+    String? customExportDirectoryUri,
+    String? customExportDirectoryName,
+    bool clearCustomDirectory = false,
   }) {
     return UserSettings(
       themeMode: themeMode ?? this.themeMode,
@@ -56,6 +63,8 @@ class UserSettings {
       selectedModelId: selectedModelId ?? this.selectedModelId,
       threadCount: threadCount ?? this.threadCount,
       exportToPublicDownloads: exportToPublicDownloads ?? this.exportToPublicDownloads,
+      customExportDirectoryUri: clearCustomDirectory ? null : (customExportDirectoryUri ?? this.customExportDirectoryUri),
+      customExportDirectoryName: clearCustomDirectory ? null : (customExportDirectoryName ?? this.customExportDirectoryName),
     );
   }
 
@@ -68,6 +77,8 @@ class UserSettings {
       'selectedModelId': selectedModelId,
       'threadCount': threadCount,
       'exportToPublicDownloads': exportToPublicDownloads ? 1 : 0,
+      'customExportDirectoryUri': customExportDirectoryUri,
+      'customExportDirectoryName': customExportDirectoryName,
     };
   }
 
@@ -93,6 +104,8 @@ class UserSettings {
       selectedModelId: map['selectedModelId'] ?? 'base',
       threadCount: map['threadCount'] ?? 4,
       exportToPublicDownloads: map['exportToPublicDownloads'] == 1 || map['exportToPublicDownloads'] == true,
+      customExportDirectoryUri: map['customExportDirectoryUri'] as String?,
+      customExportDirectoryName: map['customExportDirectoryName'] as String?,
     );
   }
 }

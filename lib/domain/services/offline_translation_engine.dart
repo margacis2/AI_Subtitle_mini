@@ -21,6 +21,7 @@ class OfflineTranslationEngine {
         sourceLang: sourceLang,
         targetLang: targetLang,
         packLocalPath: packLocalPath,
+        cueIndex: cue.cueIndex,
       );
 
       translatedList.add(cue.copyWith(

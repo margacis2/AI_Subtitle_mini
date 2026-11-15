@@ -127,7 +127,7 @@ void main() {
           targetLang: 'en',
           packLocalPath: null,
         ),
-        throwsA(isA<StateError>()),
+        throwsA(isA<TranslationException>()),
       );
     });
 

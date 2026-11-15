@@ -4,6 +4,26 @@ import 'package:flutter/foundation.dart';
 import 'package:onnxruntime/onnxruntime.dart';
 import 'unigram_tokenizer.dart';
 
+class TranslationException implements Exception {
+  final String message;
+  final String sourceLang;
+  final String targetLang;
+  final int? cueIndex;
+
+  TranslationException({
+    required this.message,
+    required this.sourceLang,
+    required this.targetLang,
+    this.cueIndex,
+  });
+
+  @override
+  String toString() {
+    final cueStr = cueIndex != null ? ' (cue #$cueIndex)' : '';
+    return 'TranslationException[$sourceLang->$targetLang]$cueStr: $message';
+  }
+}
+
 class OnnxTranslationEngine {
   static final OnnxTranslationEngine _instance = OnnxTranslationEngine._internal();
   factory OnnxTranslationEngine() => _instance;
@@ -77,6 +97,7 @@ class OnnxTranslationEngine {
     required String sourceLang,
     required String targetLang,
     String? packLocalPath,
+    int? cueIndex,
   }) async {
     final clean = text.trim();
     if (clean.isEmpty) return clean;
@@ -86,25 +107,49 @@ class OnnxTranslationEngine {
     if (src == tgt) return clean;
 
     if (packLocalPath == null || !Directory(packLocalPath).existsSync()) {
-      throw StateError(
-        'Neural language pack for "$src" to "$tgt" is not installed. '
-        'Please download it from the Language Packs screen.',
+      throw TranslationException(
+        message: 'Neural language pack is not installed locally. Please download it from Language Packs.',
+        sourceLang: src,
+        targetLang: tgt,
+        cueIndex: cueIndex,
       );
     }
 
     await loadPack(packLocalPath);
 
     if (_encoderSession == null || _decoderSession == null || _tokenizer == null) {
-      throw StateError('Failed to initialize ONNX sessions for language pack: $packLocalPath');
+      throw TranslationException(
+        message: 'Failed to initialize ONNX runtime sessions for pack: $packLocalPath',
+        sourceLang: src,
+        targetLang: tgt,
+        cueIndex: cueIndex,
+      );
     }
 
-    return _runSeq2Seq(clean);
+    return _runSeq2Seq(
+      text: clean,
+      sourceLang: src,
+      targetLang: tgt,
+      cueIndex: cueIndex,
+    );
   }
 
-  Future<String> _runSeq2Seq(String text) async {
+  Future<String> _runSeq2Seq({
+    required String text,
+    required String sourceLang,
+    required String targetLang,
+    int? cueIndex,
+  }) async {
     final tokenizer = _tokenizer!;
     final inputTokens = tokenizer.encode(text);
-    if (inputTokens.isEmpty) return text;
+    if (inputTokens.isEmpty) {
+      throw TranslationException(
+        message: 'Tokenizer failed to produce valid input tokens for text: "$text"',
+        sourceLang: sourceLang,
+        targetLang: targetLang,
+        cueIndex: cueIndex,
+      );
+    }
 
     final runOptions = OrtRunOptions();
     OrtValueTensor? encInput;
@@ -125,34 +170,27 @@ class OnnxTranslationEngine {
 
       encOutputs = _encoderSession!.run(runOptions, encInputs);
       if (encOutputs.isEmpty || encOutputs[0] == null) {
-        throw StateError('Encoder produced no output tensor.');
+        throw TranslationException(
+          message: 'Encoder produced no output tensor.',
+          sourceLang: sourceLang,
+          targetLang: targetLang,
+          cueIndex: cueIndex,
+        );
       }
       final encoderHiddenStates = encOutputs[0]!;
 
       // 2. Autoregressive greedy decoding loop
       final startToken = tokenizer.padTokenId;
       final generatedIds = <int>[startToken];
-      final maxLen = min(seqLen * 2 + 15, 128);
-
-      final decInputName = _decoderSession!.inputNames.firstWhere(
-        (n) => n.contains('input_ids') || n.contains('decoder'),
-        orElse: () => 'input_ids',
-      );
-      final encHiddenName = _decoderSession!.inputNames.firstWhere(
-        (n) => n.contains('hidden_states') || n.contains('encoder'),
-        orElse: () => 'encoder_hidden_states',
-      );
-      final hasEncMask = _decoderSession!.inputNames.any((n) => n.contains('encoder_attention_mask'));
+      final maxLen = min(seqLen * 2 + 20, 128);
 
       for (int step = 0; step < maxLen; step++) {
         final decInput = OrtValueTensor.createTensorWithDataList(generatedIds, [1, generatedIds.length]);
         final decInputs = <String, OrtValue>{
-          decInputName: decInput,
-          encHiddenName: encoderHiddenStates,
+          'input_ids': decInput,
+          'encoder_hidden_states': encoderHiddenStates,
+          'encoder_attention_mask': encMask,
         };
-        if (hasEncMask) {
-          decInputs['encoder_attention_mask'] = encMask;
-        }
 
         final decOutputs = _decoderSession!.run(runOptions, decInputs);
         decInput.release();
@@ -193,11 +231,41 @@ class OnnxTranslationEngine {
       // Decode generated token IDs skipping start token
       final resultTokens = generatedIds.skip(1).toList();
       final translated = tokenizer.decode(resultTokens);
-      return translated.isNotEmpty ? translated : text;
+
+      if (translated.isEmpty) {
+        throw TranslationException(
+          message: 'Neural model produced empty translation for dialogue: "$text"',
+          sourceLang: sourceLang,
+          targetLang: targetLang,
+          cueIndex: cueIndex,
+        );
+      }
+
+      // Detect obvious source passthrough when translating between different language scripts
+      if (sourceLang == 'ja' && targetLang == 'en') {
+        final hasJapanese = RegExp(r'[\u3040-\u30ff\u4e00-\u9fff]').hasMatch(translated);
+        final hasLatin = RegExp(r'[a-zA-Z]').hasMatch(translated);
+        if (hasJapanese && !hasLatin) {
+          throw TranslationException(
+            message: 'Inference failed to translate Japanese dialogue to English: "$translated"',
+            sourceLang: sourceLang,
+            targetLang: targetLang,
+            cueIndex: cueIndex,
+          );
+        }
+      }
+
+      return translated;
     } catch (e) {
-      debugPrint('[OnnxTranslationEngine] Inference error on text "$text": $e');
-      // Per specification: preserve original dialogue text on cue failure
-      return text;
+      if (e is TranslationException) {
+        rethrow;
+      }
+      throw TranslationException(
+        message: 'ONNX inference error on "$text": $e',
+        sourceLang: sourceLang,
+        targetLang: targetLang,
+        cueIndex: cueIndex,
+      );
     } finally {
       encInput?.release();
       encMask?.release();

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../domain/entities/user_settings.dart';
+import '../../../native/storage/android_storage_service.dart';
 import '../../providers.dart';
 
 class SettingsScreen extends ConsumerWidget {
@@ -86,6 +87,62 @@ class SettingsScreen extends ConsumerWidget {
                     subtitle: const Text('Export files to Downloads/AI Subtitles/ for easy sharing'),
                     value: settings.exportToPublicDownloads,
                     onChanged: (val) => notifier.updateSettings(settings.copyWith(exportToPublicDownloads: val)),
+                  ),
+                  const Divider(height: 24),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('Export Destination', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                            const SizedBox(height: 4),
+                            Text(
+                              settings.customExportDirectoryName != null
+                                  ? 'Custom Folder: ${settings.customExportDirectoryName}'
+                                  : 'Internal Storage/Download/AI Subtitles/',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: theme.colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Wrap(
+                        spacing: 8,
+                        children: [
+                          FilledButton.tonalIcon(
+                            icon: const Icon(Icons.folder_open_rounded, size: 16),
+                            label: const Text('Change'),
+                            style: FilledButton.styleFrom(
+                              visualDensity: VisualDensity.compact,
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                            ),
+                            onPressed: () async {
+                              final picked = await AndroidStorageService.pickDirectory();
+                              if (picked != null && picked['uri'] != null) {
+                                notifier.updateSettings(settings.copyWith(
+                                  customExportDirectoryUri: picked['uri'],
+                                  customExportDirectoryName: picked['displayName'] ?? 'Custom Folder',
+                                ));
+                              }
+                            },
+                          ),
+                          if (settings.customExportDirectoryUri != null)
+                            TextButton(
+                              style: TextButton.styleFrom(
+                                visualDensity: VisualDensity.compact,
+                              ),
+                              onPressed: () {
+                                notifier.updateSettings(settings.copyWith(clearCustomDirectory: true));
+                              },
+                              child: const Text('Reset'),
+                            ),
+                        ],
+                      ),
+                    ],
                   ),
                 ],
               ),

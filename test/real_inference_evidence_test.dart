@@ -231,5 +231,30 @@ All processing happens directly on your device.
       expect(medium.sizeBytes, greaterThan(1400 * 1024 * 1024));
       expect(medium.sha256, isNotNull);
     });
+
+    test('7. Whisper Tiny catalog checksum and size match upstream ggerganov artifact', () {
+      final tiny = WhisperModelInfo.catalog.firstWhere((m) => m.id == 'tiny');
+      expect(tiny.sha256, equals('be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21'));
+      expect(tiny.sizeBytes, equals(77691713));
+    });
+
+    test('8. OnnxTranslationEngine throws TranslationException when pack is missing', () async {
+      final engine = OnnxTranslationEngine();
+      expect(
+        () => engine.translateText(
+          text: 'こんにちは世界',
+          sourceLang: 'ja',
+          targetLang: 'en',
+          packLocalPath: null,
+          cueIndex: 5,
+        ),
+        throwsA(
+          isA<TranslationException>()
+              .having((e) => e.cueIndex, 'cueIndex', equals(5))
+              .having((e) => e.sourceLang, 'sourceLang', equals('ja'))
+              .having((e) => e.targetLang, 'targetLang', equals('en')),
+        ),
+      );
+    });
   });
 }

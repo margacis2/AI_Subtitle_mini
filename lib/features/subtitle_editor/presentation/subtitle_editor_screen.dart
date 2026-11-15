@@ -475,17 +475,21 @@ class _SubtitleEditorScreenState extends ConsumerState<SubtitleEditorScreen> {
 
   Future<void> _exportSubtitles(String format) async {
     try {
-      final file = await SubtitleExportService.exportToFile(
+      final settings = ref.read(settingsProvider);
+      final result = await SubtitleExportService.exportToFile(
         projectName: _project?.name ?? 'Subtitles',
         cues: _cues,
         format: format,
         style: _style,
+        saveToPublicDownloads: settings.exportToPublicDownloads,
+        customTreeUri: settings.customExportDirectoryUri,
       );
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Exported successfully to: ${file.path}'),
+            content: Text('Exported ${result.cueCount} cues (${result.format}) to:\n${result.pathOrUri}'),
+            duration: const Duration(seconds: 5),
             action: SnackBarAction(label: 'OK', onPressed: () {}),
           ),
         );

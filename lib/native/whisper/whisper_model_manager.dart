@@ -57,53 +57,65 @@ class WhisperModelManager {
 
     onProgress(0.01, 'Connecting to Hugging Face repository...');
 
-    await _dio.download(
-      model.downloadUrl,
-      tempFile.path,
-      cancelToken: cancelToken,
-      onReceiveProgress: (received, total) {
-        if (total > 0) {
-          final frac = received / total;
-          final mbRec = (received / (1024 * 1024)).toStringAsFixed(1);
-          final mbTot = (total / (1024 * 1024)).toStringAsFixed(1);
-          onProgress(frac * 0.95, 'Downloading ${model.displayName} ($mbRec / $mbTot MB)...');
-        }
-      },
-    );
+    try {
+      await _dio.download(
+        model.downloadUrl,
+        tempFile.path,
+        cancelToken: cancelToken,
+        onReceiveProgress: (received, total) {
+          if (total > 0) {
+            final frac = received / total;
+            final mbRec = (received / (1024 * 1024)).toStringAsFixed(1);
+            final mbTot = (total / (1024 * 1024)).toStringAsFixed(1);
+            onProgress(frac * 0.95, 'Downloading ${model.displayName} ($mbRec / $mbTot MB)...');
+          }
+        },
+      );
 
-    // Verify file size
-    final downloadedBytes = await tempFile.length();
-    if (downloadedBytes < 1000) {
-      throw Exception('Downloaded file is invalid or too small ($downloadedBytes bytes).');
-    }
-
-    // Rename temp file to target
-    if (await targetFile.exists()) {
-      await targetFile.delete();
-    }
-    await tempFile.rename(targetFile.path);
-
-    onProgress(0.97, 'Verifying model integrity (SHA-256)...');
-    if (model.sha256 != null && model.sha256!.isNotEmpty) {
-      final digest = await sha256.bind(targetFile.openRead()).first;
-      final hashStr = digest.toString().toLowerCase();
-      if (hashStr != model.sha256!.toLowerCase()) {
-        await targetFile.delete();
-        throw Exception('SHA-256 verification failed. Expected ${model.sha256}, got $hashStr. Corrupted file deleted.');
+      // 1. Verify downloaded file size
+      final downloadedBytes = await tempFile.length();
+      if (downloadedBytes < 1000) {
+        throw Exception('Downloaded file is invalid or too small ($downloadedBytes bytes).');
       }
+
+      // 2. Verify SHA-256 integrity on temporary file BEFORE replacing any existing model
+      onProgress(0.97, 'Verifying model integrity (SHA-256)...');
+      if (model.sha256 != null && model.sha256!.isNotEmpty) {
+        final digest = await sha256.bind(tempFile.openRead()).first;
+        final hashStr = digest.toString().toLowerCase();
+        if (hashStr != model.sha256!.toLowerCase()) {
+          throw Exception(
+            'SHA-256 verification failed for ${model.displayName}. Expected ${model.sha256}, got $hashStr. Corrupt download rejected.',
+          );
+        }
+      }
+
+      // 3. Atomically replace target model file
+      if (await targetFile.exists()) {
+        await targetFile.delete();
+      }
+      await tempFile.rename(targetFile.path);
+
+      // 4. Save installation record in database only after verification succeeds
+      await _db.recordModelInstallation(
+        id: model.id,
+        displayName: model.displayName,
+        fileName: model.fileName,
+        localPath: targetFile.path,
+        sizeBytes: downloadedBytes,
+        sha256: model.sha256,
+      );
+
+      onProgress(1.0, '${model.displayName} installed and verified.');
+    } catch (e) {
+      // Clean up temporary download file; existing targetFile remains untouched
+      if (await tempFile.exists()) {
+        try {
+          await tempFile.delete();
+        } catch (_) {}
+      }
+      rethrow;
     }
-
-    // Save to database
-    await _db.recordModelInstallation(
-      id: model.id,
-      displayName: model.displayName,
-      fileName: model.fileName,
-      localPath: targetFile.path,
-      sizeBytes: downloadedBytes,
-      sha256: model.sha256,
-    );
-
-    onProgress(1.0, 'Model ready for offline speech inference.');
   }
 
   Future<void> deleteModel(String modelId) async {
