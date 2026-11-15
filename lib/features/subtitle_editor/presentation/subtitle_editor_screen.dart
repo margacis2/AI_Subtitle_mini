@@ -1,14 +1,20 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../../core/utilities/timestamp_utils.dart';
 import '../../../data/database/app_database.dart';
+import '../../../domain/entities/processing_job.dart';
 import '../../../domain/entities/project.dart';
 import '../../../domain/entities/subtitle_cue.dart';
 import '../../../domain/entities/subtitle_style.dart';
+import '../../../domain/services/background_translation_service.dart';
+import '../../../domain/services/job_scheduler.dart';
 import '../../../domain/services/subtitle_export_service.dart';
+import '../../../domain/services/translation_pack_manager.dart';
 import '../../providers.dart';
 
 class SubtitleEditorScreen extends ConsumerStatefulWidget {
@@ -43,6 +49,9 @@ class _SubtitleEditorScreenState extends ConsumerState<SubtitleEditorScreen> {
   bool _autoScrollEnabled = true;
   bool _isFullscreen = false;
   int? _lastActiveCueIndex;
+
+  StreamSubscription<ProjectCuesEvent>? _cuesSub;
+  StreamSubscription<ProcessingJob>? _jobSub;
 
   final List<List<SubtitleCue>> _undoStack = [];
   final List<List<SubtitleCue>> _redoStack = [];
@@ -88,6 +97,23 @@ class _SubtitleEditorScreenState extends ConsumerState<SubtitleEditorScreen> {
     } else {
       _loadProjectAndCues();
     }
+
+    _cuesSub = JobScheduler().cuesStream.listen((event) {
+      if (event.projectId == widget.projectId && mounted) {
+        setState(() {
+          _cues = List.from(event.cues);
+          _isLoading = false;
+        });
+      }
+    });
+
+    _jobSub = JobScheduler().jobStream.listen((job) {
+      if (job.projectId == widget.projectId && mounted) {
+        if (job.stage == JobStage.completed || job.stage == JobStage.formatting) {
+          _loadProjectAndCues();
+        }
+      }
+    });
   }
 
   Future<void> _loadProjectAndCues() async {
@@ -505,11 +531,151 @@ class _SubtitleEditorScreenState extends ConsumerState<SubtitleEditorScreen> {
 
   @override
   void dispose() {
+    _cuesSub?.cancel();
+    _jobSub?.cancel();
     _videoController?.removeListener(_onVideoTick);
     _videoController?.dispose();
     _searchController.dispose();
     _cueScrollController.dispose();
     super.dispose();
+  }
+
+  void _openTranslateSheet() async {
+    final packs = await TranslationPackManager().getPacksWithStatus();
+    final installedPacks = packs.where((p) => p.isInstalled && p.localPath != null).toList();
+
+    if (!mounted) return;
+
+    if (installedPacks.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('No neural language packs installed. Please download one from Language Packs first.'),
+          action: SnackBarAction(
+            label: 'Install',
+            onPressed: () => context.push('/language-packs'),
+          ),
+        ),
+      );
+      return;
+    }
+
+    String selectedPackId = installedPacks.first.id;
+    bool isTranslating = false;
+    double progress = 0.0;
+    String status = '';
+    BackgroundTranslationHandle? handle;
+
+    showModalBottomSheet(
+      context: context,
+      isDismissible: !isTranslating,
+      isScrollControlled: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setSheetState) {
+          final pack = installedPacks.firstWhere((p) => p.id == selectedPackId, orElse: () => installedPacks.first);
+          return Padding(
+            padding: EdgeInsets.only(
+              bottom: MediaQuery.of(ctx).viewInsets.bottom + 20,
+              left: 20,
+              right: 20,
+              top: 20,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text('Translate Cues with Neural Engine', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
+                    IconButton(
+                      icon: const Icon(Icons.close),
+                      onPressed: isTranslating ? null : () => Navigator.pop(ctx),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Text('Select Target Language Pack:', style: Theme.of(context).textTheme.bodyMedium),
+                const SizedBox(height: 8),
+                DropdownButtonFormField<String>(
+                  value: selectedPackId,
+                  decoration: const InputDecoration(border: OutlineInputBorder(), contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10)),
+                  items: installedPacks.map((p) => DropdownMenuItem(value: p.id, child: Text(p.displayName))).toList(),
+                  onChanged: isTranslating ? null : (val) {
+                    if (val != null) setSheetState(() => selectedPackId = val);
+                  },
+                ),
+                const SizedBox(height: 16),
+                if (isTranslating) ...[
+                  LinearProgressIndicator(value: progress > 0 ? progress : null),
+                  const SizedBox(height: 8),
+                  Text(status, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    onPressed: () {
+                      handle?.cancel();
+                      setSheetState(() => isTranslating = false);
+                    },
+                    icon: const Icon(Icons.cancel_outlined, color: Colors.redAccent),
+                    label: const Text('Cancel Translation', style: TextStyle(color: Colors.redAccent)),
+                  ),
+                ] else ...[
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      icon: const Icon(Icons.translate_rounded),
+                      label: Text('Translate ${_cues.length} Cues (${pack.targetLang.toUpperCase()})'),
+                      onPressed: _cues.isEmpty ? null : () {
+                        setSheetState(() {
+                          isTranslating = true;
+                          progress = 0.0;
+                          status = 'Starting background neural translation...';
+                        });
+
+                        final h = BackgroundTranslationService.translateCues(
+                          cues: _cues,
+                          sourceLang: pack.sourceLang,
+                          targetLang: pack.targetLang,
+                          packLocalPath: pack.localPath!,
+                        );
+                        handle = h;
+
+                        h.stream.listen((event) {
+                          if (event is TranslationProgressEvent) {
+                            setSheetState(() {
+                              progress = event.totalCues > 0 ? event.completedCues / event.totalCues : 0.0;
+                              status = 'Translated ${event.completedCues}/${event.totalCues} cues...';
+                            });
+                          } else if (event is TranslationFinishedEvent) {
+                            if (mounted) {
+                              setState(() {
+                                _cues = event.cues;
+                              });
+                              _saveCues(record: true);
+                              Navigator.pop(ctx);
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text('Successfully translated ${event.successCount} cues to ${pack.targetLang.toUpperCase()}!'),
+                                  backgroundColor: const Color(0xFF10B981),
+                                ),
+                              );
+                            }
+                          } else if (event is TranslationErrorEvent) {
+                            setSheetState(() {
+                              isTranslating = false;
+                              status = 'Error: ${event.error}';
+                            });
+                          }
+                        });
+                      },
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          );
+        },
+      ),
+    );
   }
 
   @override
@@ -537,6 +703,11 @@ class _SubtitleEditorScreenState extends ConsumerState<SubtitleEditorScreen> {
                   icon: const Icon(Icons.redo_rounded),
                   tooltip: 'Redo',
                   onPressed: _redoStack.isNotEmpty ? _redo : null,
+                ),
+                IconButton(
+                  icon: const Icon(Icons.translate_rounded),
+                  tooltip: 'Translate All Cues',
+                  onPressed: _openTranslateSheet,
                 ),
                 IconButton(
                   icon: const Icon(Icons.style_outlined),

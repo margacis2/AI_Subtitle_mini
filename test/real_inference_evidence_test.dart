@@ -356,5 +356,59 @@ All processing happens directly on your device.
       expect(catalog.any((p) => p.sourceLang == 'hi' && p.targetLang == 'en'), isTrue);
       expect(catalog.any((p) => p.sourceLang == 'en' && p.targetLang == 'hi'), isTrue);
     });
+
+    test('12. WavUtils on-demand chunk range calculation handles arbitrary audio durations', () {
+      // 6m20s = 380,000ms
+      const totalAudioMs = 380000;
+      final count = WavUtils.calculateChunkCount(totalAudioMs, chunkDurationMs: 30000);
+      expect(count, equals(13));
+
+      // Check range for chunk 10 (0-based index 9)
+      final (startMs, endMs) = WavUtils.getChunkRange(9, totalAudioMs, chunkDurationMs: 30000);
+      expect(startMs, equals(270000));
+      expect(endMs, equals(300000));
+
+      // Check range for final chunk 13 (0-based index 12)
+      final (lastStartMs, lastEndMs) = WavUtils.getChunkRange(12, totalAudioMs, chunkDurationMs: 30000);
+      expect(lastStartMs, equals(360000));
+      expect(lastEndMs, equals(380000)); // clamped to total duration
+    });
+
+    test('13. ProcessingJob supports explicit recoverable and paused states for crash recovery', () {
+      final job = ProcessingJob(
+        id: 'recover_test',
+        projectId: 'proj_recover',
+        title: 'Recovery Test',
+        stage: JobStage.recoverable,
+        progress: 0.62,
+        createdAt: DateTime.now(),
+        currentChunk: 10,
+        totalChunks: 13,
+      );
+
+      expect(job.stage.isRecoverable, isTrue);
+      expect(job.stage.isActive, isFalse);
+      expect(job.stage.displayName, equals('Recoverable (Interrupted)'));
+
+      final pausedJob = job.copyWith(stage: JobStage.paused);
+      expect(pausedJob.stage.isPaused, isTrue);
+      expect(pausedJob.stage.isActive, isFalse);
+    });
+
+    test('14. SubtitleCue toMap removes id for pristine autoincrement in SQLite', () {
+      const cue = SubtitleCue(
+        id: 999,
+        projectId: 'proj_demo',
+        cueIndex: 1,
+        startMs: 1000,
+        endMs: 3000,
+        text: 'Clean insert test',
+      );
+
+      final map = cue.toMap()..remove('id');
+      expect(map.containsKey('id'), isFalse);
+      expect(map['project_id'], equals('proj_demo'));
+      expect(map['text'], equals('Clean insert test'));
+    });
   });
 }

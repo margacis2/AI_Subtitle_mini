@@ -112,6 +112,21 @@ class WavUtils {
     return outFile;
   }
 
+  /// Computes the total number of chunks for a given audio file duration.
+  static int calculateChunkCount(int totalDurationMs, {int chunkDurationMs = 30000}) {
+    if (totalDurationMs <= 0) return 0;
+    if (totalDurationMs <= 45000) return 1;
+    return ((totalDurationMs + chunkDurationMs - 1) ~/ chunkDurationMs);
+  }
+
+  /// Calculates start and end timestamps (in milliseconds) for chunk at [index] (0-based).
+  static (int startMs, int endMs) getChunkRange(int index, int totalDurationMs, {int chunkDurationMs = 30000}) {
+    if (totalDurationMs <= 45000) return (0, totalDurationMs);
+    final startMs = index * chunkDurationMs;
+    final endMs = ((index + 1) * chunkDurationMs).clamp(0, totalDurationMs);
+    return (startMs, endMs);
+  }
+
   /// Splits an audio file into 30-second sequential chunks for Whisper processing.
   static Future<List<WavChunk>> createChunks({
     required File sourceWav,

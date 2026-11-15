@@ -12,6 +12,7 @@ import '../../../data/serializers/txt_serializer.dart';
 import '../../../data/serializers/vtt_serializer.dart';
 import '../../../domain/entities/subtitle_cue.dart';
 import '../../../domain/entities/translation_pack_info.dart';
+import '../../../domain/services/background_translation_service.dart';
 import '../../../domain/services/subtitle_export_service.dart';
 import '../../../native/translation/onnx_translation_engine.dart';
 import '../../providers.dart';
@@ -34,7 +35,7 @@ class _TranslateScreenState extends ConsumerState<TranslateScreen> with SingleTi
   bool _isTranslatingSubtitles = false;
   double _translationProgress = 0.0;
   String _translationStatus = '';
-  bool _cancelRequested = false;
+  BackgroundTranslationHandle? _translationHandle;
 
   // --- Quick Dialogue State ---
   final TextEditingController _quickInputController = TextEditingController();
@@ -167,7 +168,6 @@ class _TranslateScreenState extends ConsumerState<TranslateScreen> with SingleTi
 
     setState(() {
       _isTranslatingSubtitles = true;
-      _cancelRequested = false;
       _translationProgress = 0.0;
       if (!retryFailedOnly) {
         _successfulCuesCount = 0;
@@ -175,105 +175,76 @@ class _TranslateScreenState extends ConsumerState<TranslateScreen> with SingleTi
         _failedCueIndexes.clear();
         _translatedCues.clear();
       }
-      _translationStatus = 'Initializing ONNX neural model...';
+      _translationStatus = 'Initializing background ONNX neural model...';
     });
 
-    final stopwatch = Stopwatch()..start();
-    final total = _sourceCues.length;
     final Map<int, SubtitleCue> currentTranslated = {
       for (var c in _translatedCues) c.cueIndex: c,
     };
 
-    try {
-      for (int i = 0; i < total; i++) {
-        if (_cancelRequested) {
-          setState(() {
-            _translationStatus = 'Translation cancelled by user ($_successfulCuesCount/$total translated).';
-            _isTranslatingSubtitles = false;
-          });
-          return;
-        }
+    final handle = BackgroundTranslationService.translateCues(
+      cues: _sourceCues,
+      sourceLang: _sourceLang,
+      targetLang: _targetLang,
+      packLocalPath: installedPack.localPath!,
+      retryCueIndexes: retryFailedOnly ? _failedCueIndexes.toList() : null,
+    );
+    _translationHandle = handle;
 
-        final cue = _sourceCues[i];
-        if (retryFailedOnly && currentTranslated.containsKey(cue.cueIndex)) {
-          continue; // Already successfully translated
-        }
-
+    handle.stream.listen((event) {
+      if (!mounted) return;
+      if (event is TranslationProgressEvent) {
         setState(() {
-          _translationStatus = 'Translating cue ${i + 1} of $total...';
-          _translationProgress = i / total;
-          _elapsedDuration = stopwatch.elapsed;
-          if (_successfulCuesCount > 0) {
-            final avgMs = stopwatch.elapsedMilliseconds / _successfulCuesCount;
-            final remainingCues = total - _successfulCuesCount;
-            _estimatedRemaining = Duration(milliseconds: (avgMs * remainingCues).round());
+          _translationProgress = event.totalCues > 0 ? (event.completedCues / event.totalCues) : 0.0;
+          _elapsedDuration = event.elapsed;
+          _estimatedRemaining = event.estimatedRemaining;
+          _successfulCuesCount = event.completedCues - event.failedCues;
+          _failedCuesCount = event.failedCues;
+          _translationStatus = 'Translating cue ${event.completedCues} of ${event.totalCues}...';
+          if (event.lastTranslatedCue != null) {
+            currentTranslated[event.lastTranslatedCue!.cueIndex] = event.lastTranslatedCue!;
+            _translatedCues = currentTranslated.values.toList()
+              ..sort((a, b) => a.cueIndex.compareTo(b.cueIndex));
           }
         });
-
-        try {
-          final translatedText = await OnnxTranslationEngine().translateText(
-            text: cue.text,
-            sourceLang: _sourceLang,
-            targetLang: _targetLang,
-            packLocalPath: installedPack.localPath,
-            cueIndex: cue.cueIndex,
-          );
-
-          currentTranslated[cue.cueIndex] = cue.copyWith(
-            text: translatedText,
-            originalText: cue.originalText ?? cue.text,
-          );
-          _failedCueIndexes.remove(cue.cueIndex);
-          _successfulCuesCount = currentTranslated.length;
-        } catch (cueErr) {
-          _failedCueIndexes.add(cue.cueIndex);
-          debugPrint('Translation error on cue #${cue.cueIndex}: $cueErr');
-        }
-
-        _failedCuesCount = _failedCueIndexes.length;
+      } else if (event is TranslationFinishedEvent) {
         setState(() {
-          _translationProgress = (i + 1) / total;
-          _translatedCues = currentTranslated.values.toList()
-            ..sort((a, b) => a.cueIndex.compareTo(b.cueIndex));
-          _elapsedDuration = stopwatch.elapsed;
+          _isTranslatingSubtitles = false;
+          _translatedCues = event.cues;
+          _successfulCuesCount = event.successCount;
+          _failedCuesCount = event.failedCount;
+          _translationStatus = _failedCuesCount > 0
+              ? 'Completed: $_successfulCuesCount translated, $_failedCuesCount failed.'
+              : 'Translation completed: $_successfulCuesCount cues translated.';
         });
-      }
-
-      stopwatch.stop();
-      setState(() {
-        _isTranslatingSubtitles = false;
-        _translationStatus = _failedCuesCount > 0
-            ? 'Completed: $_successfulCuesCount translated, $_failedCuesCount failed.'
-            : 'Translation completed: $_successfulCuesCount cues translated.';
-      });
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              _failedCuesCount > 0
-                  ? 'Translated $_successfulCuesCount cues to $_targetLang ($_failedCuesCount failed).'
-                  : 'Successfully translated all $_successfulCuesCount cues to $_targetLang!',
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                _failedCuesCount > 0
+                    ? 'Translated $_successfulCuesCount cues to $_targetLang ($_failedCuesCount failed).'
+                    : 'Successfully translated all $_successfulCuesCount cues to $_targetLang!',
+              ),
+              backgroundColor: _failedCuesCount > 0 ? Colors.amber[800] : const Color(0xFF10B981),
             ),
-          ),
-        );
+          );
+        }
+      } else if (event is TranslationErrorEvent) {
+        setState(() {
+          _isTranslatingSubtitles = false;
+          _translationStatus = 'Error: ${event.error}';
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Translation error: ${event.error}'),
+              backgroundColor: Colors.redAccent,
+              duration: const Duration(seconds: 6),
+            ),
+          );
+        }
       }
-    } catch (e) {
-      stopwatch.stop();
-      setState(() {
-        _isTranslatingSubtitles = false;
-        _translationStatus = 'Error during translation: $e';
-      });
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Translation error: $e'),
-            backgroundColor: Colors.redAccent,
-            duration: const Duration(seconds: 6),
-          ),
-        );
-      }
-    }
+    });
   }
 
   // --- 3. Export Subtitles ---
@@ -578,7 +549,13 @@ class _TranslateScreenState extends ConsumerState<TranslateScreen> with SingleTi
                         TextButton.icon(
                           icon: const Icon(Icons.cancel_outlined, size: 16, color: Colors.redAccent),
                           label: const Text('Cancel', style: TextStyle(color: Colors.redAccent)),
-                          onPressed: () => setState(() => _cancelRequested = true),
+                          onPressed: () {
+                            _translationHandle?.cancel();
+                            setState(() {
+                              _isTranslatingSubtitles = false;
+                              _translationStatus = 'Translation cancelled by user ($_successfulCuesCount cues translated).';
+                            });
+                          },
                         ),
                       ],
                     ),

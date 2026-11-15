@@ -18,6 +18,9 @@ class WhisperEngine {
     required String projectId,
     String language = 'auto',
     int threadCount = 4,
+    int startChunkIndex = 0,
+    List<SubtitleCue>? existingCues,
+    Future<void> Function(List<SubtitleCue> newlyGenerated, List<SubtitleCue> allAccumulated)? onCuesGenerated,
     required void Function(double progress, String step) onProgress,
     void Function({
       required double progress,
@@ -64,6 +67,11 @@ class WhisperEngine {
     final modelDir = File(modelPath).parent.path;
     final totalAudioMs = WavUtils.getDurationMs(audioFile);
     final totalAudioDuration = Duration(milliseconds: totalAudioMs);
+    final totalChunks = WavUtils.calculateChunkCount(totalAudioMs);
+
+    if (totalChunks <= 0) {
+      return [];
+    }
 
     onProgress(0.2, 'Initializing native Whisper.cpp inference runtime...');
 
@@ -72,33 +80,27 @@ class WhisperEngine {
       modelDir: modelDir,
     );
 
-    // Audio Chunking: Slice into 30-second windows if longer than 45s
+    // On-demand chunk temporary directory
     final tempDir = await getTemporaryDirectory();
     final chunkDir = Directory('${tempDir.path}/whisper_chunks_${DateTime.now().millisecondsSinceEpoch}');
     if (!await chunkDir.exists()) {
       await chunkDir.create(recursive: true);
     }
 
-    final chunks = await WavUtils.createChunks(
-      sourceWav: audioFile,
-      tempDirectoryPath: chunkDir.path,
-      chunkDurationMs: 30000,
-    );
-
-    final totalChunks = chunks.isNotEmpty ? chunks.length : 1;
     final stopwatch = Stopwatch()..start();
-    final List<SubtitleCue> allCues = [];
-    int cueIndex = 1;
+    final List<SubtitleCue> allCues = List<SubtitleCue>.from(existingCues ?? []);
+    int cueIndex = allCues.length + 1;
+    final safeThreads = threadCount.clamp(1, 4);
 
     try {
-      for (int i = 0; i < chunks.length; i++) {
+      for (int i = startChunkIndex; i < totalChunks; i++) {
         if (isCancelled?.call() == true) {
           throw Exception('Transcription cancelled by user.');
         }
 
-        final chunk = chunks[i];
-        final completedChunks = i;
-        final remainingChunks = chunks.length - i;
+        final (chunkStartMs, chunkEndMs) = WavUtils.getChunkRange(i, totalAudioMs);
+        final completedChunks = i - startChunkIndex;
+        final remainingChunks = totalChunks - i;
 
         Duration? estimatedRemaining;
         Duration? estimatedTotal;
@@ -109,8 +111,11 @@ class WhisperEngine {
         }
 
         final chunkProgress = (i / totalChunks).clamp(0.0, 1.0);
+        final startSec = (chunkStartMs / 1000).floor();
+        final endSec = (chunkEndMs / 1000).ceil();
+        final timeLabel = '${(startSec ~/ 60).toString().padLeft(2, '0')}:${(startSec % 60).toString().padLeft(2, '0')} - ${(endSec ~/ 60).toString().padLeft(2, '0')}:${(endSec % 60).toString().padLeft(2, '0')}';
         final statusMsg = totalChunks > 1
-            ? 'Transcribing audio segment ${i + 1} of $totalChunks (${chunk.timeRangeLabel})...'
+            ? 'Transcribing audio segment ${i + 1} of $totalChunks ($timeLabel)...'
             : 'Running speech recognition inference...';
 
         onProgress(0.35 + (chunkProgress * 0.50), statusMsg);
@@ -124,6 +129,22 @@ class WhisperEngine {
           estimatedTotal: estimatedTotal,
           audioDuration: totalAudioDuration,
         );
+
+        // Slice ONLY the current chunk on demand to minimize disk usage
+        String chunkAudioPath;
+        File? chunkFileToClean;
+        if (totalChunks == 1) {
+          chunkAudioPath = audioFile.path;
+        } else {
+          final chunkPath = '${chunkDir.path}/chunk_${i + 1}.wav';
+          chunkFileToClean = await WavUtils.sliceWav(
+            sourceWav: audioFile,
+            startMs: chunkStartMs,
+            endMs: chunkEndMs,
+            outputPath: chunkPath,
+          );
+          chunkAudioPath = chunkFileToClean.path;
+        }
 
         // Keep elapsed timer live while native inference runs
         Timer? liveTimer;
@@ -148,40 +169,57 @@ class WhisperEngine {
         try {
           response = await whisper.transcribe(
             transcribeRequest: TranscribeRequest(
-              audio: chunk.path,
+              audio: chunkAudioPath,
               language: language.toLowerCase(),
-              threads: threadCount,
+              threads: safeThreads,
               isTranslate: false,
             ),
           );
         } finally {
           liveTimer.cancel();
+          // Immediately delete the chunk file from disk to prevent storage leaks
+          if (chunkFileToClean != null) {
+            try {
+              if (await chunkFileToClean.exists()) {
+                await chunkFileToClean.delete();
+              }
+            } catch (_) {}
+          }
         }
 
         final recognizedText = response.text.trim();
         final segments = response.segments;
+        final List<SubtitleCue> chunkCues = [];
 
         if (segments != null && segments.isNotEmpty) {
           for (final seg in segments) {
             final text = seg.text.trim();
-            if (text.isNotEmpty) {
-              allCues.add(SubtitleCue(
+            if (text.isNotEmpty && text != '[BLANK_AUDIO]' && !text.contains('WEBVTT')) {
+              final startMs = (seg.fromTs.inMilliseconds + chunkStartMs).clamp(0, totalAudioMs);
+              final endMs = (seg.toTs.inMilliseconds + chunkStartMs).clamp(startMs + 400, totalAudioMs);
+              chunkCues.add(SubtitleCue(
                 projectId: projectId,
                 cueIndex: cueIndex++,
-                startMs: seg.fromTs.inMilliseconds + chunk.startMs,
-                endMs: seg.toTs.inMilliseconds + chunk.startMs,
+                startMs: startMs,
+                endMs: endMs,
                 text: text,
               ));
             }
           }
-        } else if (recognizedText.isNotEmpty) {
-          allCues.add(SubtitleCue(
+        } else if (recognizedText.isNotEmpty && recognizedText != '[BLANK_AUDIO]') {
+          chunkCues.add(SubtitleCue(
             projectId: projectId,
             cueIndex: cueIndex++,
-            startMs: chunk.startMs,
-            endMs: chunk.endMs,
+            startMs: chunkStartMs,
+            endMs: chunkEndMs,
             text: recognizedText,
           ));
+        }
+
+        if (chunkCues.isNotEmpty) {
+          allCues.addAll(chunkCues);
+          // Persist cues incrementally and notify listeners
+          await onCuesGenerated?.call(chunkCues, allCues);
         }
       }
 

@@ -151,6 +151,11 @@ class JobsNotifier extends AsyncNotifier<List<ProcessingJob>> {
     await loadJobs();
   }
 
+  Future<void> resumeJob(String id) async {
+    await JobScheduler().resumeJob(id);
+    await loadJobs();
+  }
+
   Future<void> cancelJob(String id) async {
     await JobScheduler().cancelJob(id);
     await loadJobs();

@@ -156,11 +156,18 @@ class AppDatabase {
 
   Future<void> saveProject(Project project) async {
     final db = await database;
-    await db.insert(
+    final updated = await db.update(
       'projects',
       project.toMap(),
-      conflictAlgorithm: ConflictAlgorithm.replace,
+      where: 'id = ?',
+      whereArgs: [project.id],
     );
+    if (updated == 0) {
+      await db.insert(
+        'projects',
+        project.toMap(),
+      );
+    }
   }
 
   Future<void> deleteProject(String id) async {
@@ -186,12 +193,44 @@ class AppDatabase {
       await txn.delete('subtitle_cues', where: 'project_id = ?', whereArgs: [projectId]);
       for (int i = 0; i < cues.length; i++) {
         final cue = cues[i].copyWith(cueIndex: i + 1, projectId: projectId);
-        await txn.insert('subtitle_cues', cue.toMap());
+        final map = cue.toMap()..remove('id');
+        await txn.insert('subtitle_cues', map);
       }
       await txn.update(
         'projects',
         {
           'cue_count': cues.length,
+          'updated_at': DateTime.now().toIso8601String(),
+        },
+        where: 'id = ?',
+        whereArgs: [projectId],
+      );
+    });
+  }
+
+  Future<void> appendCuesForProject(String projectId, List<SubtitleCue> newCues) async {
+    if (newCues.isEmpty) return;
+    final db = await database;
+    await db.transaction((txn) async {
+      final existingCountMap = await txn.rawQuery(
+        'SELECT COUNT(*) as cnt FROM subtitle_cues WHERE project_id = ?',
+        [projectId],
+      );
+      int startingIndex = (existingCountMap.first['cnt'] as int? ?? 0) + 1;
+
+      for (int i = 0; i < newCues.length; i++) {
+        final cue = newCues[i].copyWith(
+          cueIndex: startingIndex + i,
+          projectId: projectId,
+        );
+        final map = cue.toMap()..remove('id');
+        await txn.insert('subtitle_cues', map);
+      }
+
+      await txn.update(
+        'projects',
+        {
+          'cue_count': startingIndex + newCues.length - 1,
           'updated_at': DateTime.now().toIso8601String(),
         },
         where: 'id = ?',
@@ -236,11 +275,18 @@ class AppDatabase {
 
   Future<void> saveJob(ProcessingJob job) async {
     final db = await database;
-    await db.insert(
+    final updated = await db.update(
       'processing_jobs',
       job.toMap(),
-      conflictAlgorithm: ConflictAlgorithm.replace,
+      where: 'id = ?',
+      whereArgs: [job.id],
     );
+    if (updated == 0) {
+      await db.insert(
+        'processing_jobs',
+        job.toMap(),
+      );
+    }
   }
 
   Future<void> deleteJob(String id) async {

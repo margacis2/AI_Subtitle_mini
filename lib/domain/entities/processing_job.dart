@@ -2,10 +2,14 @@ import 'package:equatable/equatable.dart';
 
 enum JobStage {
   queued,
+  preparing,
   extractingAudio,
+  running,
   transcribing,
   translating,
   formatting,
+  paused,
+  recoverable,
   completed,
   failed,
   cancelled;
@@ -14,14 +18,22 @@ enum JobStage {
     switch (this) {
       case JobStage.queued:
         return 'Queued';
+      case JobStage.preparing:
+        return 'Preparing';
       case JobStage.extractingAudio:
         return 'Extracting Audio';
+      case JobStage.running:
+        return 'Running';
       case JobStage.transcribing:
         return 'Transcribing (Whisper)';
       case JobStage.translating:
         return 'Translating';
       case JobStage.formatting:
         return 'Formatting Subtitles';
+      case JobStage.paused:
+        return 'Paused';
+      case JobStage.recoverable:
+        return 'Recoverable (Interrupted)';
       case JobStage.completed:
         return 'Completed';
       case JobStage.failed:
@@ -33,10 +45,15 @@ enum JobStage {
 
   bool get isActive =>
       this == JobStage.queued ||
+      this == JobStage.preparing ||
       this == JobStage.extractingAudio ||
+      this == JobStage.running ||
       this == JobStage.transcribing ||
       this == JobStage.translating ||
       this == JobStage.formatting;
+
+  bool get isRecoverable => this == JobStage.recoverable;
+  bool get isPaused => this == JobStage.paused;
 }
 
 class ProcessingJob extends Equatable {

@@ -14,6 +14,12 @@ import 'profanity_filter_service.dart';
 import 'subtitle_splitting_service.dart';
 import 'translation_pack_manager.dart';
 
+class ProjectCuesEvent {
+  final String projectId;
+  final List<SubtitleCue> cues;
+  const ProjectCuesEvent({required this.projectId, required this.cues});
+}
+
 class JobScheduler {
   static final JobScheduler _instance = JobScheduler._internal();
   factory JobScheduler() => _instance;
@@ -28,6 +34,13 @@ class JobScheduler {
 
   final StreamController<ProcessingJob> _jobStreamController = StreamController<ProcessingJob>.broadcast();
   Stream<ProcessingJob> get jobStream => _jobStreamController.stream;
+
+  final StreamController<ProjectCuesEvent> _cuesStreamController = StreamController<ProjectCuesEvent>.broadcast();
+  Stream<ProjectCuesEvent> get cuesStream => _cuesStreamController.stream;
+
+  void notifyCuesUpdated(String projectId, List<SubtitleCue> cues) {
+    _cuesStreamController.add(ProjectCuesEvent(projectId: projectId, cues: cues));
+  }
 
   final Set<String> _cancelledJobIds = {};
   bool _isProcessing = false;
@@ -127,12 +140,31 @@ class JobScheduler {
         audioDurationSeconds: audioDurationSec,
       );
 
+      final existingCues = await _db.getCuesForProject(project.id);
+      int startChunkIndex = 0;
+      if (job.currentChunk != null && job.currentChunk! > 1) {
+        startChunkIndex = job.currentChunk! - 1;
+      }
+
       final rawCues = await _whisperEngine.transcribe(
         audioPath: audioPath,
         modelPath: modelPath,
         projectId: project.id,
         language: project.sourceLanguage,
         threadCount: settings.threadCount,
+        startChunkIndex: startChunkIndex,
+        existingCues: existingCues,
+        onCuesGenerated: (chunkCues, allAccumulated) async {
+          // Format cues incrementally and persist to SQLite immediately
+          final splitCues = _splittingService.splitCues(allAccumulated);
+          final masked = ProfanityFilterService.maskCues(
+            splitCues,
+            settings.censorMaskType,
+            placeholder: settings.censorPlaceholder,
+          );
+          await _db.replaceCuesForProject(project.id, masked);
+          _cuesStreamController.add(ProjectCuesEvent(projectId: project.id, cues: masked));
+        },
         onProgress: (p, s) {
           _updateJob(
             job,
@@ -236,6 +268,7 @@ class JobScheduler {
 
       // Save generated cues into database
       await _db.replaceCuesForProject(project.id, finalCues);
+      _cuesStreamController.add(ProjectCuesEvent(projectId: project.id, cues: finalCues));
 
       // Step 5: Mark Project & Job Completed
       await _db.saveProject(project.copyWith(
@@ -325,6 +358,38 @@ class JobScheduler {
       await _db.saveJob(retried);
       _jobStreamController.add(retried);
       triggerQueueProcessing();
+    }
+  }
+
+  Future<void> resumeJob(String jobId) async {
+    _cancelledJobIds.remove(jobId);
+    final job = await _db.getJob(jobId);
+    if (job != null) {
+      final chunkToResume = (job.currentChunk != null && job.currentChunk! > 1) ? job.currentChunk! : 1;
+      final resumed = job.copyWith(
+        stage: JobStage.queued,
+        currentStep: 'Resuming from chunk $chunkToResume of ${job.totalChunks ?? 1}...',
+        errorDetails: null,
+        completedAt: null,
+      );
+      await _db.saveJob(resumed);
+      _jobStreamController.add(resumed);
+      triggerQueueProcessing();
+    }
+  }
+
+  Future<void> recoverOrphanedJobs() async {
+    final allJobs = await _db.getAllJobs();
+    for (final job in allJobs) {
+      if (job.stage.isActive && job.stage != JobStage.queued) {
+        final existingCues = await _db.getCuesForProject(job.projectId);
+        final recoverable = job.copyWith(
+          stage: JobStage.recoverable,
+          currentStep: 'Interrupted at chunk ${job.currentChunk ?? 0}/${job.totalChunks ?? 0} (${existingCues.length} cues saved). Tap Resume.',
+        );
+        await _db.saveJob(recoverable);
+        _jobStreamController.add(recoverable);
+      }
     }
   }
 }

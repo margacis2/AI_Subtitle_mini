@@ -142,11 +142,17 @@ class _ModernJobCard extends ConsumerWidget {
         statusIcon = Icons.hourglass_top_rounded;
         statusLabel = 'In Queue';
         break;
+      case JobStage.preparing:
+        statusColor = const Color(0xFF06B6D4); // Cyan
+        statusIcon = Icons.tune_rounded;
+        statusLabel = 'Preparing';
+        break;
       case JobStage.extractingAudio:
         statusColor = const Color(0xFF06B6D4); // Cyan
         statusIcon = Icons.graphic_eq_rounded;
         statusLabel = 'Extracting Audio';
         break;
+      case JobStage.running:
       case JobStage.transcribing:
         statusColor = const Color(0xFF6366F1); // Indigo
         statusIcon = Icons.record_voice_over_rounded;
@@ -161,6 +167,16 @@ class _ModernJobCard extends ConsumerWidget {
         statusColor = const Color(0xFF3B82F6); // Blue
         statusIcon = Icons.auto_awesome_rounded;
         statusLabel = 'Formatting Cues';
+        break;
+      case JobStage.paused:
+        statusColor = Colors.orangeAccent;
+        statusIcon = Icons.pause_circle_outline_rounded;
+        statusLabel = 'Paused';
+        break;
+      case JobStage.recoverable:
+        statusColor = const Color(0xFFF59E0B); // Amber
+        statusIcon = Icons.replay_rounded;
+        statusLabel = 'Interrupted (Recoverable)';
         break;
       case JobStage.completed:
         statusColor = const Color(0xFF10B981); // Emerald
@@ -255,6 +271,18 @@ class _ModernJobCard extends ConsumerWidget {
                       icon: const Icon(Icons.arrow_forward_rounded, size: 16),
                       label: const Text('Open'),
                       onPressed: () => context.push('/editor/${job.projectId}'),
+                    )
+                  else if (job.stage == JobStage.recoverable)
+                    FilledButton.tonalIcon(
+                      style: FilledButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                        visualDensity: VisualDensity.compact,
+                        backgroundColor: const Color(0xFFF59E0B).withAlpha(40),
+                        foregroundColor: const Color(0xFFF59E0B),
+                      ),
+                      icon: const Icon(Icons.play_arrow_rounded, size: 16),
+                      label: const Text('Resume'),
+                      onPressed: () => ref.read(jobsProvider.notifier).resumeJob(job.id),
                     )
                   else if (job.stage == JobStage.failed)
                     IconButton(
