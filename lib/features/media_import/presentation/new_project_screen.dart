@@ -9,6 +9,7 @@ import 'package:uuid/uuid.dart';
 import '../../../data/database/app_database.dart';
 import '../../../data/serializers/ass_serializer.dart';
 import '../../../data/serializers/srt_serializer.dart';
+import '../../../data/serializers/txt_serializer.dart';
 import '../../../data/serializers/vtt_serializer.dart';
 import '../../../domain/entities/processing_job.dart';
 import '../../../domain/entities/project.dart';
@@ -79,7 +80,7 @@ class _NewProjectScreenState extends ConsumerState<NewProjectScreen> {
     try {
       final files = await FilePicker.pickFiles(
         type: FileType.custom,
-        allowedExtensions: ['srt', 'vtt', 'ass'],
+        allowedExtensions: ['srt', 'vtt', 'ass', 'ssa', 'txt'],
       );
 
       if (files.isNotEmpty && files.first.path != null) {
@@ -116,6 +117,36 @@ class _NewProjectScreenState extends ConsumerState<NewProjectScreen> {
       return;
     }
 
+    // Verify Whisper model before starting speech recognition
+    if (_selectedMediaPath != null) {
+      final models = await ref.read(whisperModelsProvider.future);
+      final hasInstalled = models.any((m) => m.isInstalled);
+      if (!hasInstalled) {
+        if (!mounted) return;
+        final goToModels = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Whisper Model Required'),
+            content: const Text(
+              'No Whisper model is installed locally. You must download at least one model (e.g. Tiny or Base) in the Model Library before starting speech recognition.',
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+              FilledButton.icon(
+                onPressed: () => Navigator.pop(ctx, true),
+                icon: const Icon(Icons.download_rounded),
+                label: const Text('Go to Model Library'),
+              ),
+            ],
+          ),
+        );
+        if (goToModels == true && mounted) {
+          context.push('/models');
+        }
+        return;
+      }
+    }
+
     setState(() => _isLoading = true);
 
     try {
@@ -131,8 +162,10 @@ class _NewProjectScreenState extends ConsumerState<NewProjectScreen> {
         List<SubtitleCue> cues = [];
         if (ext == '.vtt') {
           cues = VttSerializer.parse(content, projectId: projectId);
-        } else if (ext == '.ass') {
+        } else if (ext == '.ass' || ext == '.ssa') {
           cues = AssSerializer.parse(content, projectId: projectId);
+        } else if (ext == '.txt') {
+          cues = TxtSerializer.parse(content, projectId: projectId);
         } else {
           cues = SrtSerializer.parse(content, projectId: projectId);
         }

@@ -1,3 +1,4 @@
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -15,8 +16,21 @@ class LanguagePacksScreen extends ConsumerStatefulWidget {
 class _LanguagePacksScreenState extends ConsumerState<LanguagePacksScreen> {
   final Map<String, double> _downloadProgress = {};
   final Map<String, String> _downloadStatus = {};
+  final Map<String, CancelToken> _cancelTokens = {};
+
+  void _cancelDownload(String packId) {
+    _cancelTokens[packId]?.cancel('Cancelled by user');
+    _cancelTokens.remove(packId);
+    setState(() {
+      _downloadProgress.remove(packId);
+      _downloadStatus.remove(packId);
+    });
+  }
 
   Future<void> _startDownload(TranslationPackInfo pack) async {
+    final cancelToken = CancelToken();
+    _cancelTokens[pack.id] = cancelToken;
+
     setState(() {
       _downloadProgress[pack.id] = 0.05;
       _downloadStatus[pack.id] = 'Preparing download...';
@@ -25,7 +39,9 @@ class _LanguagePacksScreenState extends ConsumerState<LanguagePacksScreen> {
     try {
       await TranslationPackManager().downloadPack(
         pack: pack,
+        cancelToken: cancelToken,
         onProgress: (p, s) {
+          if (!mounted) return;
           setState(() {
             _downloadProgress[pack.id] = p;
             _downloadStatus[pack.id] = s;
@@ -41,12 +57,13 @@ class _LanguagePacksScreenState extends ConsumerState<LanguagePacksScreen> {
         );
       }
     } catch (e) {
-      if (mounted) {
+      if (mounted && !cancelToken.isCancelled) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Installation failed: $e')),
         );
       }
     } finally {
+      _cancelTokens.remove(pack.id);
       if (mounted) {
         setState(() {
           _downloadProgress.remove(pack.id);
@@ -160,9 +177,20 @@ class _LanguagePacksScreenState extends ConsumerState<LanguagePacksScreen> {
                         const SizedBox(height: 12),
                         LinearProgressIndicator(value: progress),
                         const SizedBox(height: 6),
-                        Text(
-                          statusText,
-                          style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.primary),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                statusText,
+                                style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.primary),
+                              ),
+                            ),
+                            TextButton.icon(
+                              onPressed: () => _cancelDownload(pack.id),
+                              icon: const Icon(Icons.cancel_outlined, size: 16, color: Colors.redAccent),
+                              label: const Text('Cancel', style: TextStyle(color: Colors.redAccent, fontSize: 12)),
+                            ),
+                          ],
                         ),
                       ],
                     ],

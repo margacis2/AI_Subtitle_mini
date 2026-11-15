@@ -6,8 +6,9 @@ import 'package:intl/intl.dart';
 import '../../../core/utilities/timestamp_utils.dart';
 import '../../../domain/entities/project.dart';
 import '../../batch_queue/presentation/batch_queue_screen.dart';
+import '../../language_packs/presentation/language_packs_screen.dart';
 import '../../model_library/presentation/model_library_screen.dart';
-import '../../settings/presentation/settings_screen.dart';
+import '../../translation/presentation/translate_screen.dart';
 import '../../providers.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
@@ -43,7 +44,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       appBar: AppBar(
         titleSpacing: 16,
         title: Row(
-          mainAxisSize: MainAxisSize.min,
           children: [
             Container(
               width: 36,
@@ -59,44 +59,51 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 ],
               ),
               clipBehavior: Clip.antiAlias,
-              child: Image.asset('assets/images/app_logo.png', fit: BoxFit.cover),
+              child: Image.asset(
+                'assets/images/app_logo.png',
+                fit: BoxFit.cover,
+                errorBuilder: (ctx, error, stackTrace) => const Icon(Icons.subtitles_rounded, color: Color(0xFF6366F1)),
+              ),
             ),
             const SizedBox(width: 10),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Text(
-                  'AI Sub Mini',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w800,
-                    fontSize: 18,
-                    letterSpacing: -0.4,
+            const Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'AI Sub Mini',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w800,
+                      fontSize: 17,
+                      letterSpacing: -0.4,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
-                ),
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Container(
-                      width: 6,
-                      height: 6,
-                      decoration: const BoxDecoration(
-                        color: Color(0xFF10B981),
-                        shape: BoxShape.circle,
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: Color(0xFF10B981),
+                          shape: BoxShape.circle,
+                        ),
+                        child: SizedBox(width: 6, height: 6),
                       ),
-                    ),
-                    const SizedBox(width: 4),
-                    const Text(
-                      '100% On-Device AI',
-                      style: TextStyle(
-                        fontSize: 10,
-                        fontWeight: FontWeight.w600,
-                        color: Color(0xFF10B981),
+                      SizedBox(width: 4),
+                      Text(
+                        '100% On-Device AI',
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF10B981),
+                        ),
                       ),
-                    ),
-                  ],
-                ),
-              ],
+                    ],
+                  ),
+                ],
+              ),
             ),
           ],
         ),
@@ -181,9 +188,19 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             label: 'Projects',
           ),
           const NavigationDestination(
+            icon: Icon(Icons.translate_outlined),
+            selectedIcon: Icon(Icons.translate_rounded),
+            label: 'Translate',
+          ),
+          const NavigationDestination(
             icon: Icon(Icons.psychology_outlined),
             selectedIcon: Icon(Icons.psychology_rounded),
-            label: 'AI Models',
+            label: 'Speech AI',
+          ),
+          const NavigationDestination(
+            icon: Icon(Icons.language_outlined),
+            selectedIcon: Icon(Icons.language_rounded),
+            label: 'Lang Packs',
           ),
           NavigationDestination(
             icon: Badge(
@@ -197,11 +214,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               child: const Icon(Icons.layers_rounded),
             ),
             label: 'Queue',
-          ),
-          const NavigationDestination(
-            icon: Icon(Icons.tune_outlined),
-            selectedIcon: Icon(Icons.tune_rounded),
-            label: 'Studio',
           ),
         ],
       ),
@@ -220,11 +232,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       case 0:
         return _buildProjectsTab(projectsAsync, theme);
       case 1:
-        return const ModelLibraryScreen();
+        return const TranslateScreen();
       case 2:
-        return const BatchQueueScreen();
+        return const ModelLibraryScreen();
       case 3:
-        return const SettingsScreen();
+        return const LanguagePacksScreen();
+      case 4:
+        return const BatchQueueScreen();
       default:
         return _buildProjectsTab(projectsAsync, theme);
     }
@@ -262,8 +276,22 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           child: ListView(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             children: [
-              // Fast Quick Import Card
-              _QuickActionBanner(onTap: () => context.push('/new-project')),
+              // Fast Quick Import Cards
+              _QuickActionBanner(
+                title: 'Transcribe Video / Audio',
+                subtitle: 'Offline Whisper speech recognition & auto-subtitles',
+                icon: Icons.auto_fix_high_rounded,
+                gradient: const [Color(0xFF6366F1), Color(0xFF8B5CF6)],
+                onTap: () => context.push('/new-project'),
+              ),
+              const SizedBox(height: 10),
+              _QuickActionBanner(
+                title: 'Translate Subtitles (SRT/VTT/ASS/TXT)',
+                subtitle: 'Offline neural translation with strict timestamp preservation',
+                icon: Icons.translate_rounded,
+                gradient: const [Color(0xFF0EA5E9), Color(0xFF2563EB)],
+                onTap: () => setState(() => _currentIndex = 1),
+              ),
               const SizedBox(height: 16),
 
               // Search Bar if projects exist
@@ -352,69 +380,80 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 }
 
 class _QuickActionBanner extends StatelessWidget {
+  final String title;
+  final String subtitle;
+  final IconData icon;
+  final List<Color> gradient;
   final VoidCallback onTap;
-  const _QuickActionBanner({required this.onTap});
+
+  const _QuickActionBanner({
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+    required this.gradient,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Container(
       decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          colors: [Color(0xFF6366F1), Color(0xFF8B5CF6)],
+        gradient: LinearGradient(
+          colors: gradient,
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(18),
         boxShadow: [
           BoxShadow(
-            color: const Color(0xFF6366F1).withAlpha(80),
-            blurRadius: 16,
-            offset: const Offset(0, 6),
+            color: gradient.first.withAlpha(60),
+            blurRadius: 14,
+            offset: const Offset(0, 5),
           ),
         ],
       ),
       child: Material(
         color: Colors.transparent,
         child: InkWell(
-          borderRadius: BorderRadius.circular(20),
+          borderRadius: BorderRadius.circular(18),
           onTap: onTap,
           child: Padding(
-            padding: const EdgeInsets.all(20),
+            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
             child: Row(
               children: [
                 Container(
-                  padding: const EdgeInsets.all(12),
+                  padding: const EdgeInsets.all(10),
                   decoration: BoxDecoration(
-                    color: Colors.white.withAlpha(50),
+                    color: Colors.white.withAlpha(45),
                     shape: BoxShape.circle,
                   ),
-                  child: const Icon(Icons.auto_fix_high_rounded, color: Colors.white, size: 26),
+                  child: Icon(icon, color: Colors.white, size: 24),
                 ),
-                const SizedBox(width: 16),
-                const Expanded(
+                const SizedBox(width: 14),
+                Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        'Transcribe Video / Audio',
-                        style: TextStyle(
+                        title,
+                        style: const TextStyle(
                           color: Colors.white,
-                          fontSize: 16,
+                          fontSize: 15,
                           fontWeight: FontWeight.bold,
                         ),
                       ),
-                      SizedBox(height: 3),
+                      const SizedBox(height: 2),
                       Text(
-                        'Offline Whisper speech recognition & neural translation',
-                        style: TextStyle(
+                        subtitle,
+                        style: const TextStyle(
                           color: Colors.white70,
-                          fontSize: 12,
+                          fontSize: 11,
                         ),
                       ),
                     ],
                   ),
                 ),
-                const Icon(Icons.arrow_forward_ios_rounded, color: Colors.white70, size: 16),
+                const Icon(Icons.arrow_forward_ios_rounded, color: Colors.white70, size: 14),
               ],
             ),
           ),

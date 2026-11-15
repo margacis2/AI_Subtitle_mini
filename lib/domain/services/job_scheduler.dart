@@ -11,6 +11,7 @@ import '../entities/user_settings.dart';
 import 'offline_translation_engine.dart';
 import 'profanity_filter_service.dart';
 import 'subtitle_splitting_service.dart';
+import 'translation_pack_manager.dart';
 
 class JobScheduler {
   static final JobScheduler _instance = JobScheduler._internal();
@@ -91,7 +92,12 @@ class JobScheduler {
       await _updateJob(job, JobStage.transcribing, 0.35, 'Initializing speech transcription engine...');
       final models = await _modelManager.getModelsWithStatus();
       final installedList = models.where((m) => m.isInstalled).toList();
-      final modelPath = installedList.isNotEmpty ? (installedList.first.localPath ?? '') : '';
+      if (installedList.isEmpty) {
+        throw StateError(
+          'No Whisper model installed. Please download a model (e.g. Tiny or Base) in the Model Library before starting transcription.',
+        );
+      }
+      final modelPath = installedList.first.localPath ?? '';
 
       final rawCues = await _whisperEngine.transcribe(
         audioPath: audioPath,
@@ -110,10 +116,23 @@ class JobScheduler {
           project.targetLanguage!.isNotEmpty &&
           project.targetLanguage != project.sourceLanguage) {
         await _updateJob(job, JobStage.translating, 0.75, 'Translating subtitles to ${project.targetLanguage}...');
+        final packs = await TranslationPackManager().getPacksWithStatus();
+        final matchingPack = packs.where(
+          (p) => p.sourceLang == project.sourceLanguage && p.targetLang == project.targetLanguage && p.isInstalled,
+        ).firstOrNull;
+
+        if (matchingPack == null || matchingPack.localPath == null) {
+          throw StateError(
+            'Neural language pack for ${project.sourceLanguage} to ${project.targetLanguage} is not installed. '
+            'Please install it from Language Packs.',
+          );
+        }
+
         cuesToFormat = await _translationEngine.translateCues(
           cues: rawCues,
           sourceLang: project.sourceLanguage,
           targetLang: project.targetLanguage!,
+          packLocalPath: matchingPack.localPath,
           onProgress: (p, s) {
             _updateJob(job, JobStage.translating, 0.75 + (p * 0.15), s);
           },

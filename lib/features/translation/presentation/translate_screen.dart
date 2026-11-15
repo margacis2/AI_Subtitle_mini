@@ -1,5 +1,18 @@
+import 'dart:io';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+
+import '../../../core/utilities/timestamp_utils.dart';
+import '../../../data/serializers/ass_serializer.dart';
+import '../../../data/serializers/srt_serializer.dart';
+import '../../../data/serializers/txt_serializer.dart';
+import '../../../data/serializers/vtt_serializer.dart';
+import '../../../domain/entities/subtitle_cue.dart';
+import '../../../domain/entities/translation_pack_info.dart';
 import '../../../native/translation/onnx_translation_engine.dart';
 import '../../providers.dart';
 
@@ -10,12 +23,27 @@ class TranslateScreen extends ConsumerStatefulWidget {
   ConsumerState<TranslateScreen> createState() => _TranslateScreenState();
 }
 
-class _TranslateScreenState extends ConsumerState<TranslateScreen> {
-  final TextEditingController _inputController = TextEditingController();
-  final TextEditingController _outputController = TextEditingController();
+class _TranslateScreenState extends ConsumerState<TranslateScreen> with SingleTickerProviderStateMixin {
+  late TabController _tabController;
+
+  // --- Subtitle File Workflow State ---
+  String? _importedFilePath;
+  String? _importedFileName;
+  List<SubtitleCue> _sourceCues = [];
+  List<SubtitleCue> _translatedCues = [];
+  bool _isTranslatingSubtitles = false;
+  double _translationProgress = 0.0;
+  String _translationStatus = '';
+  bool _cancelRequested = false;
+
+  // --- Quick Dialogue State ---
+  final TextEditingController _quickInputController = TextEditingController();
+  final TextEditingController _quickOutputController = TextEditingController();
+  bool _isQuickTranslating = false;
+
+  // Language pair
   String _sourceLang = 'ja';
   String _targetLang = 'en';
-  bool _isTranslating = false;
 
   final List<Map<String, String>> _langs = [
     {'code': 'ja', 'name': 'Japanese'},
@@ -23,41 +51,277 @@ class _TranslateScreenState extends ConsumerState<TranslateScreen> {
     {'code': 'hi', 'name': 'Hindi'},
     {'code': 'ta', 'name': 'Tamil'},
     {'code': 'en', 'name': 'English'},
+    {'code': 'es', 'name': 'Spanish'},
+    {'code': 'fr', 'name': 'French'},
+    {'code': 'de', 'name': 'German'},
+    {'code': 'zh', 'name': 'Chinese'},
   ];
 
-  Future<void> _performTranslation() async {
-    final text = _inputController.text.trim();
-    if (text.isEmpty) return;
-
-    setState(() => _isTranslating = true);
-
-    final packs = await ref.read(languagePacksProvider.future);
-    final matchingPack = packs.firstWhere(
-      (p) => p.sourceLang == _sourceLang && p.targetLang == _targetLang && p.isInstalled,
-      orElse: () => packs.firstWhere(
-        (p) => p.isInstalled,
-        orElse: () => packs.first,
-      ),
-    );
-
-    final result = await OnnxTranslationEngine().translateText(
-      text: text,
-      sourceLang: _sourceLang,
-      targetLang: _targetLang,
-      packLocalPath: matchingPack.isInstalled ? matchingPack.localPath : null,
-    );
-
-    setState(() {
-      _outputController.text = result;
-      _isTranslating = false;
-    });
+  @override
+  void initState() {
+    super.initState();
+    _tabController = TabController(length: 2, vsync: this);
   }
 
   @override
   void dispose() {
-    _inputController.dispose();
-    _outputController.dispose();
+    _tabController.dispose();
+    _quickInputController.dispose();
+    _quickOutputController.dispose();
     super.dispose();
+  }
+
+  // --- 1. Import Subtitle File ---
+  Future<void> _importSubtitleFile() async {
+    try {
+      final result = await FilePicker.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['srt', 'vtt', 'ass', 'ssa', 'txt'],
+      );
+
+      if (result.isEmpty || result.first.path == null) return;
+
+      final path = result.first.path!;
+      final file = File(path);
+      var content = await file.readAsString();
+
+      // Strip UTF-8 BOM if present
+      if (content.isNotEmpty && content.codeUnitAt(0) == 0xFEFF) {
+        content = content.substring(1);
+      }
+
+      final ext = p.extension(path).toLowerCase();
+      List<SubtitleCue> parsed;
+
+      if (ext == '.vtt') {
+        parsed = VttSerializer.parse(content, projectId: 'imported_trans');
+      } else if (ext == '.ass' || ext == '.ssa') {
+        parsed = AssSerializer.parse(content, projectId: 'imported_trans');
+      } else if (ext == '.txt') {
+        parsed = TxtSerializer.parse(content, projectId: 'imported_trans');
+      } else {
+        parsed = SrtSerializer.parse(content, projectId: 'imported_trans');
+      }
+
+      if (parsed.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('No subtitle cues found in the selected file.')),
+          );
+        }
+        return;
+      }
+
+      setState(() {
+        _importedFilePath = path;
+        _importedFileName = p.basename(path);
+        _sourceCues = parsed;
+        _translatedCues = [];
+        _translationProgress = 0.0;
+        _translationStatus = '';
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Successfully loaded $_importedFileName (${parsed.length} cues)')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error importing subtitle file: $e')),
+        );
+      }
+    }
+  }
+
+  // --- 2. Start Neural Batch Translation ---
+  Future<void> _startSubtitleTranslation(TranslationPackInfo? installedPack) async {
+    if (_sourceCues.isEmpty) return;
+    if (installedPack == null || !installedPack.isInstalled || installedPack.localPath == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Please install the neural language pack for $_sourceLang to $_targetLang first.'),
+          action: SnackBarAction(
+            label: 'Install',
+            onPressed: () => context.push('/language-packs'),
+          ),
+        ),
+      );
+      return;
+    }
+
+    setState(() {
+      _isTranslatingSubtitles = true;
+      _cancelRequested = false;
+      _translationProgress = 0.0;
+      _translationStatus = 'Initializing ONNX neural model...';
+    });
+
+    final total = _sourceCues.length;
+    final List<SubtitleCue> result = [];
+
+    try {
+      for (int i = 0; i < total; i++) {
+        if (_cancelRequested) {
+          setState(() {
+            _translationStatus = 'Translation cancelled by user.';
+            _isTranslatingSubtitles = false;
+          });
+          return;
+        }
+
+        final cue = _sourceCues[i];
+        final translatedText = await OnnxTranslationEngine().translateText(
+          text: cue.text,
+          sourceLang: _sourceLang,
+          targetLang: _targetLang,
+          packLocalPath: installedPack.localPath,
+        );
+
+        // Strictly preserve timestamps and cue ordering
+        result.add(cue.copyWith(
+          text: translatedText,
+          originalText: cue.originalText ?? cue.text,
+        ));
+
+        setState(() {
+          _translationProgress = (i + 1) / total;
+          _translationStatus = 'Translating cue ${i + 1} of $total...';
+          _translatedCues = List.from(result);
+        });
+      }
+
+      setState(() {
+        _isTranslatingSubtitles = false;
+        _translationStatus = 'Translation completed ($total cues translated).';
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Neural translation completed successfully!')),
+        );
+      }
+    } catch (e) {
+      setState(() {
+        _isTranslatingSubtitles = false;
+        _translationStatus = 'Error during translation: $e';
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Translation error: $e')),
+        );
+      }
+    }
+  }
+
+  // --- 3. Export Subtitles ---
+  Future<void> _exportSubtitles(String format) async {
+    final cues = _translatedCues.isNotEmpty ? _translatedCues : _sourceCues;
+    if (cues.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No subtitle cues available to export.')),
+      );
+      return;
+    }
+
+    try {
+      String serialized;
+      String extension;
+
+      switch (format.toLowerCase()) {
+        case 'vtt':
+          serialized = VttSerializer.serialize(cues);
+          extension = 'vtt';
+          break;
+        case 'ass':
+          serialized = AssSerializer.serialize(cues);
+          extension = 'ass';
+          break;
+        case 'srt':
+        default:
+          serialized = SrtSerializer.serialize(cues);
+          extension = 'srt';
+          break;
+      }
+
+      final baseName = _importedFileName != null
+          ? p.basenameWithoutExtension(_importedFileName!)
+          : 'subtitles';
+      final fileName = '${baseName}_translated_$_targetLang.$extension';
+
+      Directory exportDir;
+      try {
+        final downloads = await getDownloadsDirectory();
+        exportDir = downloads ?? await getApplicationDocumentsDirectory();
+      } catch (_) {
+        exportDir = await getApplicationDocumentsDirectory();
+      }
+
+      final outFile = File(p.join(exportDir.path, fileName));
+      await outFile.writeAsString(serialized);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Exported to: ${outFile.path}'),
+            duration: const Duration(seconds: 5),
+            action: SnackBarAction(
+              label: 'OK',
+              onPressed: () {},
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Export failed: $e')),
+        );
+      }
+    }
+  }
+
+  // --- Quick Single Text Translation ---
+  Future<void> _performQuickTranslation(TranslationPackInfo? matchingPack) async {
+    final text = _quickInputController.text.trim();
+    if (text.isEmpty) return;
+
+    if (matchingPack == null || !matchingPack.isInstalled) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Please install the $_sourceLang to $_targetLang language pack first.'),
+          action: SnackBarAction(
+            label: 'Install',
+            onPressed: () => context.push('/language-packs'),
+          ),
+        ),
+      );
+      return;
+    }
+
+    setState(() => _isQuickTranslating = true);
+
+    try {
+      final result = await OnnxTranslationEngine().translateText(
+        text: text,
+        sourceLang: _sourceLang,
+        targetLang: _targetLang,
+        packLocalPath: matchingPack.localPath,
+      );
+
+      setState(() {
+        _quickOutputController.text = result;
+        _isQuickTranslating = false;
+      });
+    } catch (e) {
+      setState(() => _isQuickTranslating = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Translation error: $e')),
+        );
+      }
+    }
   }
 
   @override
@@ -65,116 +329,491 @@ class _TranslateScreenState extends ConsumerState<TranslateScreen> {
     final theme = Theme.of(context);
     final packsAsync = ref.watch(languagePacksProvider);
 
+    final matchingPack = packsAsync.maybeWhen(
+      data: (packs) => packs.where((p) => p.sourceLang == _sourceLang && p.targetLang == _targetLang).firstOrNull,
+      orElse: () => null,
+    );
+    final isPackInstalled = matchingPack != null && matchingPack.isInstalled;
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Neural Translation Studio'),
+        bottom: TabBar(
+          controller: _tabController,
+          tabs: const [
+            Tab(icon: Icon(Icons.subtitles_rounded), text: 'Subtitle File Translation'),
+            Tab(icon: Icon(Icons.short_text_rounded), text: 'Quick Text'),
+          ],
+        ),
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+      body: TabBarView(
+        controller: _tabController,
+        children: [
+          // Tab 1: Full Subtitle File Translation Workflow
+          _buildSubtitleFileTab(theme, matchingPack, isPackInstalled),
+
+          // Tab 2: Quick Dialogue Text
+          _buildQuickTextTab(theme, matchingPack, isPackInstalled),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSubtitleFileTab(ThemeData theme, TranslationPackInfo? matchingPack, bool isPackInstalled) {
+    final activeCues = _translatedCues.isNotEmpty ? _translatedCues : _sourceCues;
+
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        // Language Selector Card
+        _buildLanguageSelectorCard(theme),
+
+        const SizedBox(height: 12),
+
+        // Neural Model Status Banner
+        _buildModelStatusBanner(theme, matchingPack, isPackInstalled),
+
+        const SizedBox(height: 16),
+
+        // Step 1: File Import Section
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.file_open_rounded, color: Colors.blueAccent),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Import Subtitle File',
+                      style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Supports SRT, WebVTT, SubStation Alpha (ASS/SSA), and Text (TXT Mode A/B).',
+                  style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                ),
+                const SizedBox(height: 12),
+                if (_importedFilePath == null) ...[
+                  SizedBox(
+                    width: double.infinity,
+                    height: 48,
+                    child: OutlinedButton.icon(
+                      icon: const Icon(Icons.upload_file_rounded),
+                      label: const Text('Choose Subtitle File (.srt, .vtt, .ass, .ssa, .txt)'),
+                      onPressed: _importSubtitleFile,
+                    ),
+                  ),
+                ] else ...[
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.surfaceContainerHighest,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.check_circle_rounded, color: Colors.green),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                _importedFileName ?? 'Subtitle File',
+                                style: const TextStyle(fontWeight: FontWeight.bold),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              Text(
+                                '${_sourceCues.length} cues loaded',
+                                style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                              ),
+                            ],
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: _importSubtitleFile,
+                          child: const Text('Replace'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+
+        const SizedBox(height: 16),
+
+        // Step 2: Start Translation Button & Progress
+        if (_importedFilePath != null) ...[
+          if (_isTranslatingSubtitles) ...[
             Card(
               child: Padding(
                 padding: const EdgeInsets.all(16),
-                child: Row(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Expanded(
-                      child: DropdownButtonFormField<String>(
-                        initialValue: _sourceLang,
-                        decoration: const InputDecoration(labelText: 'From', border: OutlineInputBorder()),
-                        items: _langs.map((l) => DropdownMenuItem(value: l['code'], child: Text(l['name']!))).toList(),
-                        onChanged: (val) => setState(() => _sourceLang = val!),
-                      ),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text('Translating Dialogue...', style: theme.textTheme.titleSmall),
+                        Text('${(_translationProgress * 100).toStringAsFixed(0)}%'),
+                      ],
                     ),
-                    IconButton(
-                      icon: const Icon(Icons.swap_horiz_rounded),
-                      onPressed: () {
-                        setState(() {
-                          final temp = _sourceLang;
-                          _sourceLang = _targetLang;
-                          _targetLang = temp;
-                        });
-                      },
-                    ),
-                    Expanded(
-                      child: DropdownButtonFormField<String>(
-                        initialValue: _targetLang,
-                        decoration: const InputDecoration(labelText: 'To', border: OutlineInputBorder()),
-                        items: _langs.map((l) => DropdownMenuItem(value: l['code'], child: Text(l['name']!))).toList(),
-                        onChanged: (val) => setState(() => _targetLang = val!),
-                      ),
+                    const SizedBox(height: 8),
+                    LinearProgressIndicator(value: _translationProgress),
+                    const SizedBox(height: 8),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Expanded(
+                          child: Text(
+                            _translationStatus,
+                            style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.primary),
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: () => setState(() => _cancelRequested = true),
+                          child: const Text('Cancel', style: TextStyle(color: Colors.redAccent)),
+                        ),
+                      ],
                     ),
                   ],
                 ),
               ),
             ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _inputController,
-              maxLines: 5,
-              decoration: const InputDecoration(
-                labelText: 'Source Text / Dialogue',
-                hintText: 'Enter dialogue to translate...',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 16),
+          ] else ...[
             SizedBox(
-              width: double.infinity,
               height: 48,
               child: FilledButton.icon(
-                icon: _isTranslating
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                      )
-                    : const Icon(Icons.translate_rounded),
-                label: const Text('Translate with Neural Engine'),
-                onPressed: _isTranslating ? null : _performTranslation,
+                icon: const Icon(Icons.translate_rounded),
+                label: Text(
+                  _translatedCues.isNotEmpty ? 'Re-Translate Subtitles' : 'Translate All Cues with Neural Engine',
+                ),
+                onPressed: isPackInstalled ? () => _startSubtitleTranslation(matchingPack) : null,
               ),
             ),
-            const SizedBox(height: 20),
-            TextField(
-              controller: _outputController,
-              maxLines: 5,
-              readOnly: true,
+          ],
+          const SizedBox(height: 16),
+        ],
+
+        // Step 3: Export Options
+        if (activeCues.isNotEmpty) ...[
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.download_rounded, color: Colors.green),
+                      const SizedBox(width: 8),
+                      Text(
+                        'Export Subtitle File',
+                        style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+                      ),
+                      const Spacer(),
+                      if (_translatedCues.isNotEmpty)
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.green.withAlpha(40),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: const Text(
+                            'Neural Translated',
+                            style: TextStyle(color: Colors.green, fontSize: 11, fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          icon: const Icon(Icons.save_alt_rounded, size: 18),
+                          label: const Text('SRT'),
+                          onPressed: () => _exportSubtitles('srt'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          icon: const Icon(Icons.save_alt_rounded, size: 18),
+                          label: const Text('WebVTT'),
+                          onPressed: () => _exportSubtitles('vtt'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          icon: const Icon(Icons.save_alt_rounded, size: 18),
+                          label: const Text('ASS'),
+                          onPressed: () => _exportSubtitles('ass'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+
+          // Step 4: Editable Cues Preview List
+          Row(
+            children: [
+              Text(
+                'Subtitle Cues (${activeCues.length})',
+                style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+              ),
+              const Spacer(),
+              Text(
+                'Timestamps preserved strictly',
+                style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          ListView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            itemCount: activeCues.length,
+            itemBuilder: (context, index) {
+              final cue = activeCues[index];
+              return _buildCueCard(theme, cue, index);
+            },
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildCueCard(ThemeData theme, SubtitleCue cue, int index) {
+    final startStr = TimestampUtils.formatSrt(cue.startMs);
+    final endStr = TimestampUtils.formatSrt(cue.endMs);
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.primaryContainer,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    '#${cue.cueIndex}',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      color: theme.colorScheme.onPrimaryContainer,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  '$startStr  →  $endStr',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    fontFamily: 'monospace',
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+            if (cue.originalText != null && cue.originalText != cue.text) ...[
+              const SizedBox(height: 6),
+              Text(
+                cue.originalText!,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+            ],
+            const SizedBox(height: 6),
+            TextFormField(
+              initialValue: cue.text,
+              maxLines: null,
               decoration: const InputDecoration(
-                labelText: 'Translated Subtitle Output',
+                isDense: true,
                 border: OutlineInputBorder(),
-                filled: true,
+                contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
               ),
-            ),
-            const SizedBox(height: 24),
-            Text(
-              'Active Engine Status',
-              style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
-            packsAsync.when(
-              loading: () => const LinearProgressIndicator(),
-              error: (error, stackTrace) => const SizedBox.shrink(),
-              data: (packs) {
-                final hasNeural = packs.any((p) => p.sourceLang == _sourceLang && p.targetLang == _targetLang && p.isInstalled);
-                return ListTile(
-                  tileColor: theme.colorScheme.surfaceContainerHighest,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  leading: Icon(
-                    hasNeural ? Icons.check_circle : Icons.info_outline,
-                    color: hasNeural ? Colors.green : Colors.amber,
-                  ),
-                  title: Text(hasNeural ? 'Engine: ONNX Runtime Neural Transformer' : 'Engine: Rule-Based Synthesizer (Fallback)'),
-                  subtitle: Text(
-                    hasNeural
-                        ? 'High precision offline neural Seq2Seq model loaded.'
-                        : 'Download the offline language pack from Language Packs for full neural accuracy.',
-                  ),
-                );
+              onChanged: (newText) {
+                if (_translatedCues.isNotEmpty && index < _translatedCues.length) {
+                  _translatedCues[index] = _translatedCues[index].copyWith(text: newText);
+                } else if (index < _sourceCues.length) {
+                  _sourceCues[index] = _sourceCues[index].copyWith(text: newText);
+                }
               },
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildLanguageSelectorCard(ThemeData theme) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          children: [
+            Expanded(
+              child: DropdownButtonFormField<String>(
+                initialValue: _sourceLang,
+                decoration: const InputDecoration(labelText: 'Source Language', border: OutlineInputBorder()),
+                items: _langs.map((l) => DropdownMenuItem(value: l['code'], child: Text(l['name']!))).toList(),
+                onChanged: (val) => setState(() => _sourceLang = val!),
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.swap_horiz_rounded),
+              onPressed: () {
+                setState(() {
+                  final tmp = _sourceLang;
+                  _sourceLang = _targetLang;
+                  _targetLang = tmp;
+                });
+              },
+            ),
+            Expanded(
+              child: DropdownButtonFormField<String>(
+                initialValue: _targetLang,
+                decoration: const InputDecoration(labelText: 'Target Language', border: OutlineInputBorder()),
+                items: _langs.map((l) => DropdownMenuItem(value: l['code'], child: Text(l['name']!))).toList(),
+                onChanged: (val) => setState(() => _targetLang = val!),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildModelStatusBanner(ThemeData theme, TranslationPackInfo? matchingPack, bool isPackInstalled) {
+    if (isPackInstalled) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.green.withAlpha(25),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: Colors.green.withAlpha(80)),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.check_circle_rounded, color: Colors.green, size: 20),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Neural model ready: ${matchingPack?.displayName ?? "$_sourceLang to $_targetLang"}',
+                style: const TextStyle(color: Colors.green, fontWeight: FontWeight.bold, fontSize: 13),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.amber.withAlpha(25),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.amber.withAlpha(100)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.warning_amber_rounded, color: Colors.amber, size: 20),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Neural pack not installed for $_sourceLang → $_targetLang',
+                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                ),
+                Text(
+                  'Download offline model in Language Packs to translate.',
+                  style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                ),
+              ],
+            ),
+          ),
+          FilledButton.tonal(
+            onPressed: () => context.push('/language-packs'),
+            child: const Text('Install'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildQuickTextTab(ThemeData theme, TranslationPackInfo? matchingPack, bool isPackInstalled) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildLanguageSelectorCard(theme),
+          const SizedBox(height: 12),
+          _buildModelStatusBanner(theme, matchingPack, isPackInstalled),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _quickInputController,
+            maxLines: 4,
+            decoration: const InputDecoration(
+              labelText: 'Source Dialogue',
+              hintText: 'Enter text to test neural inference...',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 16),
+          SizedBox(
+            width: double.infinity,
+            height: 48,
+            child: FilledButton.icon(
+              icon: _isQuickTranslating
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                    )
+                  : const Icon(Icons.translate_rounded),
+              label: const Text('Translate Dialogue'),
+              onPressed: (_isQuickTranslating || !isPackInstalled)
+                  ? null
+                  : () => _performQuickTranslation(matchingPack),
+            ),
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _quickOutputController,
+            maxLines: 4,
+            readOnly: true,
+            decoration: const InputDecoration(
+              labelText: 'Neural Translated Output',
+              border: OutlineInputBorder(),
+              filled: true,
+            ),
+          ),
+        ],
       ),
     );
   }

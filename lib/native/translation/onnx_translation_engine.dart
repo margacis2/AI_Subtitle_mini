@@ -1,125 +1,76 @@
 import 'dart:io';
+import 'dart:math';
+import 'package:flutter/foundation.dart';
+import 'package:onnxruntime/onnxruntime.dart';
+import 'unigram_tokenizer.dart';
 
 class OnnxTranslationEngine {
   static final OnnxTranslationEngine _instance = OnnxTranslationEngine._internal();
   factory OnnxTranslationEngine() => _instance;
   OnnxTranslationEngine._internal();
 
-  /// Comprehensive multi-lingual translation dictionaries for offline neural synthesis
-  static final Map<String, Map<String, String>> _dictionaries = {
-    // English -> Spanish
-    'en-es': {
-      'Welcome to AI Sub Mini.': 'Bienvenido a AI Sub Mini.',
-      'All speech-to-text processing runs securely on your local device.': 'Todo el procesamiento de voz se ejecuta de forma segura en tu dispositivo local.',
-      'Your privacy is 100% guaranteed with zero cloud uploads or telemetry.': 'Tu privacidad está 100% garantizada sin cargas a la nube ni telemetría.',
-      'Subtitles are automatically synchronized with high temporal precision.': 'Los subtítulos se sincronizan automáticamente con alta precisión temporal.',
-      'Easily edit, translate, and export to SRT, WebVTT, and SubStation Alpha.': 'Edita, traduce y exporta fácilmente a SRT, WebVTT y SubStation Alpha.',
-      'Neural offline translation maintains perfect timestamp alignment.': 'La traducción neural sin conexión mantiene una alineación perfecta de marcas de tiempo.',
-      'Hello': 'Hola',
-      'Thank you': 'Muchas gracias',
-      'Goodbye': 'Adiós',
-      'Yes': 'Sí',
-      'No': 'No',
-    },
-    // English -> French
-    'en-fr': {
-      'Welcome to AI Sub Mini.': 'Bienvenue dans AI Sub Mini.',
-      'All speech-to-text processing runs securely on your local device.': 'Tout le traitement de la parole s\'exécute en toute sécurité sur votre appareil local.',
-      'Your privacy is 100% guaranteed with zero cloud uploads or telemetry.': 'Votre confidentialité est garantie à 100% sans aucun transfert cloud ni télémétrie.',
-      'Subtitles are automatically synchronized with high temporal precision.': 'Les sous-titres sont automatiquement synchronisés avec une grande précision temporelle.',
-      'Easily edit, translate, and export to SRT, WebVTT, and SubStation Alpha.': 'Modifiez, traduisez et exportez facilement vers SRT, WebVTT et SubStation Alpha.',
-      'Neural offline translation maintains perfect timestamp alignment.': 'La traduction neuronale hors ligne maintient un alignement temporel parfait.',
-      'Hello': 'Bonjour',
-      'Thank you': 'Merci beaucoup',
-      'Goodbye': 'Au revoir',
-      'Yes': 'Oui',
-      'No': 'Non',
-    },
-    // English -> German
-    'en-de': {
-      'Welcome to AI Sub Mini.': 'Willkommen bei AI Sub Mini.',
-      'All speech-to-text processing runs securely on your local device.': 'Die gesamte Spracherkennung läuft sicher auf Ihrem lokalen Gerät.',
-      'Your privacy is 100% guaranteed with zero cloud uploads or telemetry.': 'Ihre Privatsphäre ist zu 100% garantiert ohne Cloud-Uploads oder Telemetrie.',
-      'Subtitles are automatically synchronized with high temporal precision.': 'Untertitel werden automatisch mit hoher zeitlicher Präzision synchronisiert.',
-      'Easily edit, translate, and export to SRT, WebVTT, and SubStation Alpha.': 'Bearbeiten, übersetzen und exportieren Sie einfach nach SRT, WebVTT und SubStation Alpha.',
-      'Neural offline translation maintains perfect timestamp alignment.': 'Neuronale Offline-Übersetzung behält die perfekte Zeitstempel-Synchronisation bei.',
-      'Hello': 'Hallo',
-      'Thank you': 'Vielen Dank',
-      'Goodbye': 'Auf Wiedersehen',
-      'Yes': 'Ja',
-      'No': 'Nein',
-    },
-    // English -> Japanese
-    'en-ja': {
-      'Welcome to AI Sub Mini.': 'AI Sub Miniへようこそ。',
-      'All speech-to-text processing runs securely on your local device.': 'すべての音声認識処理はデバイス上で安全に実行されます。',
-      'Your privacy is 100% guaranteed with zero cloud uploads or telemetry.': 'クラウドへの送信は一切なく、プライバシーは100%保護されます。',
-      'Subtitles are automatically synchronized with high temporal precision.': '字幕のタイムスタンプは高い精度で自動同期されます。',
-      'Easily edit, translate, and export to SRT, WebVTT, and SubStation Alpha.': 'SRT、WebVTT、SubStation Alpha形式へ簡単に編集・翻訳・出力できます。',
-      'Neural offline translation maintains perfect timestamp alignment.': 'オフライン神経翻訳によりタイムスタンプの同期が完全に保たれます。',
-      'Hello': 'こんにちは',
-      'Thank you': 'ありがとうございます',
-      'Goodbye': 'さようなら',
-      'Yes': 'はい',
-      'No': 'いいえ',
-    },
-    // English -> Korean
-    'en-ko': {
-      'Welcome to AI Sub Mini.': 'AI Sub Mini에 오신 것을 환영합니다.',
-      'All speech-to-text processing runs securely on your local device.': '모든 음성 인식 처리는 기기 내에서 안전하게 실행됩니다.',
-      'Your privacy is 100% guaranteed with zero cloud uploads or telemetry.': '클라우드 업로드나 원격 측정 없이 개인정보가 100% 보장됩니다.',
-      'Subtitles are automatically synchronized with high temporal precision.': '자막 타임스탬프가 높은 시간 정밀도로 자동 동기화됩니다.',
-      'Easily edit, translate, and export to SRT, WebVTT, and SubStation Alpha.': 'SRT, WebVTT 및 SubStation Alpha 형식으로 손쉽게 편집, 번역, 내보내기를 수행하세요.',
-      'Neural offline translation maintains perfect timestamp alignment.': '오프라인 신경망 번역으로 완벽한 타임스탬프 정렬이 유지됩니다.',
-      'Hello': '안녕하세요',
-      'Thank you': '감사합니다',
-      'Goodbye': '안녕히 계세요',
-      'Yes': '네',
-      'No': '아니요',
-    },
-    // English -> Hindi
-    'en-hi': {
-      'Welcome to AI Sub Mini.': 'AI Sub Mini में आपका स्वागत है।',
-      'All speech-to-text processing runs securely on your local device.': 'सभी वॉयस प्रोसेसिंग आपके स्थानीय डिवाइस पर सुरक्षित रूप से चलती है।',
-      'Your privacy is 100% guaranteed with zero cloud uploads or telemetry.': 'शून्य क्लाउड अपलोड के साथ आपकी गोपनीयता 100% सुरक्षित है।',
-      'Subtitles are automatically synchronized with high temporal precision.': 'उपशीर्षक उच्च सटीकता के साथ स्वतः सिंक होते हैं।',
-      'Easily edit, translate, and export to SRT, WebVTT, and SubStation Alpha.': 'SRT, WebVTT और SubStation Alpha में आसानी से संपादित, अनुवाद और निर्यात करें।',
-      'Neural offline translation maintains perfect timestamp alignment.': 'न्यूरल ऑफलाइन अनुवाद सही समय-स्टैम्प संरेखण बनाए रखता है।',
-      'Hello': 'नमस्ते',
-      'Thank you': 'धन्यवाद',
-      'Goodbye': 'अलविदा',
-      'Yes': 'हाँ',
-      'No': 'नहीं',
-    },
-    // English -> Tamil
-    'en-ta': {
-      'Welcome to AI Sub Mini.': 'AI Sub Mini-க்கு வரவேற்கிறோம்.',
-      'All speech-to-text processing runs securely on your local device.': 'அனைத்து குரல் செயலாக்கங்களும் உங்கள் சாதனத்தில் பாதுகாப்பாக இயங்குகின்றன.',
-      'Your privacy is 100% guaranteed with zero cloud uploads or telemetry.': 'மேகக்கணி பதிவேற்றம் இன்றி உங்கள் தனியுரிமை 100% பாதுகாக்கப்படுகிறது.',
-      'Subtitles are automatically synchronized with high temporal precision.': 'துணைத்தலைப்புகள் துல்லியமான நேர முத்திரைகளுடன் ஒத்திசைக்கப்படுகின்றன.',
-      'Easily edit, translate, and export to SRT, WebVTT, and SubStation Alpha.': 'SRT, WebVTT மற்றும் SubStation Alpha வடிவங்களில் எளிதாக திருத்தவும் ஏற்றுமதி செய்யவும்.',
-      'Neural offline translation maintains perfect timestamp alignment.': 'ஆஃப்லைன் நரம்பியல் மொழிபெயர்ப்பு சரியான நேர முத்திரைகளை பராமரிக்கிறது.',
-      'Hello': 'வணக்கம்',
-      'Thank you': 'நன்றி',
-      'Goodbye': 'விடைபெறுகிறேன்',
-      'Yes': 'ஆம்',
-      'No': 'இல்லை',
-    },
-    // English -> Chinese
-    'en-zh': {
-      'Welcome to AI Sub Mini.': '欢迎使用 AI Sub Mini。',
-      'All speech-to-text processing runs securely on your local device.': '所有语音识别处理均在本地设备上安全运行。',
-      'Your privacy is 100% guaranteed with zero cloud uploads or telemetry.': '无需云端上传或数据上报，百分之百保障隐私安全。',
-      'Subtitles are automatically synchronized with high temporal precision.': '字幕时间戳已实现高精度自动对齐。',
-      'Easily edit, translate, and export to SRT, WebVTT, and SubStation Alpha.': '轻松编辑、翻译并导出为 SRT、WebVTT 和 SubStation Alpha 格式。',
-      'Neural offline translation maintains perfect timestamp alignment.': '离线神经翻译引擎完美保持原音频时间轴同步。',
-      'Hello': '你好',
-      'Thank you': '谢谢',
-      'Goodbye': '再见',
-      'Yes': '是',
-      'No': '否',
-    },
-  };
+  bool _ortInitialized = false;
+  String? _loadedPackPath;
+  OrtSession? _encoderSession;
+  OrtSession? _decoderSession;
+  UnigramTokenizer? _tokenizer;
+  OrtSessionOptions? _sessionOptions;
+
+  void _ensureOrt() {
+    if (!_ortInitialized) {
+      try {
+        OrtEnv.instance.init();
+        _ortInitialized = true;
+      } catch (e) {
+        debugPrint('[OnnxTranslationEngine] OrtEnv init warning: $e');
+      }
+    }
+  }
+
+  Future<void> loadPack(String packDir) async {
+    if (_loadedPackPath == packDir && _encoderSession != null && _decoderSession != null && _tokenizer != null) {
+      return;
+    }
+
+    _ensureOrt();
+    _releaseSessions();
+
+    final encoderFile = File('$packDir/encoder_model_quantized.onnx');
+    final decoderFile = File('$packDir/decoder_model_quantized.onnx');
+    final tokenizerFile = File('$packDir/tokenizer.json');
+
+    if (!await encoderFile.exists() || !await decoderFile.exists()) {
+      throw FileSystemException(
+        'Neural model files not found in $packDir. Ensure the language pack is fully downloaded.',
+        encoderFile.path,
+      );
+    }
+
+    _sessionOptions = OrtSessionOptions()
+      ..setInterOpNumThreads(1)
+      ..setIntraOpNumThreads(2)
+      ..setSessionGraphOptimizationLevel(GraphOptimizationLevel.ortEnableAll);
+
+    _encoderSession = OrtSession.fromFile(encoderFile, _sessionOptions!);
+    _decoderSession = OrtSession.fromFile(decoderFile, _sessionOptions!);
+    _tokenizer = await UnigramTokenizer.fromFile(tokenizerFile.path);
+    _loadedPackPath = packDir;
+  }
+
+  void _releaseSessions() {
+    try {
+      _encoderSession?.release();
+      _encoderSession = null;
+      _decoderSession?.release();
+      _decoderSession = null;
+      _sessionOptions?.release();
+      _sessionOptions = null;
+      _tokenizer = null;
+      _loadedPackPath = null;
+    } catch (e) {
+      debugPrint('[OnnxTranslationEngine] Release sessions error: $e');
+    }
+  }
 
   Future<String> translateText({
     required String text,
@@ -132,63 +83,134 @@ class OnnxTranslationEngine {
 
     final src = sourceLang == 'auto' ? 'en' : sourceLang.toLowerCase();
     final tgt = targetLang.toLowerCase();
-
     if (src == tgt) return clean;
 
-    // Check if quantized ONNX model files are locally installed
-    if (packLocalPath != null) {
-      final encoderFile = File('$packLocalPath/encoder_model_quantized.onnx');
-      final decoderFile = File('$packLocalPath/decoder_model_quantized.onnx');
-      if (await encoderFile.exists() && await decoderFile.exists()) {
-        return _neuralTranslate(clean, src, tgt, packLocalPath);
-      }
+    if (packLocalPath == null || !Directory(packLocalPath).existsSync()) {
+      throw StateError(
+        'Neural language pack for "$src" to "$tgt" is not installed. '
+        'Please download it from the Language Packs screen.',
+      );
     }
 
-    // High fidelity offline phrase & semantic synthesizer
-    return _synthesizerTranslate(clean, src, tgt);
+    await loadPack(packLocalPath);
+
+    if (_encoderSession == null || _decoderSession == null || _tokenizer == null) {
+      throw StateError('Failed to initialize ONNX sessions for language pack: $packLocalPath');
+    }
+
+    return _runSeq2Seq(clean);
   }
 
-  Future<String> _neuralTranslate(String text, String src, String tgt, String packDir) async {
-    final key = '$src-$tgt';
-    final dict = _dictionaries[key];
-    if (dict != null && dict.containsKey(text)) {
-      return dict[text]!;
+  Future<String> _runSeq2Seq(String text) async {
+    final tokenizer = _tokenizer!;
+    final inputTokens = tokenizer.encode(text);
+    if (inputTokens.isEmpty) return text;
+
+    final runOptions = OrtRunOptions();
+    OrtValueTensor? encInput;
+    OrtValueTensor? encMask;
+    List<OrtValue?>? encOutputs;
+
+    try {
+      final seqLen = inputTokens.length;
+      final encShape = [1, seqLen];
+      encInput = OrtValueTensor.createTensorWithDataList(inputTokens, encShape);
+      encMask = OrtValueTensor.createTensorWithDataList(List.filled(seqLen, 1), encShape);
+
+      // 1. Run Marian / Seq2Seq Encoder
+      final encInputs = <String, OrtValue>{
+        'input_ids': encInput,
+        'attention_mask': encMask,
+      };
+
+      encOutputs = _encoderSession!.run(runOptions, encInputs);
+      if (encOutputs.isEmpty || encOutputs[0] == null) {
+        throw StateError('Encoder produced no output tensor.');
+      }
+      final encoderHiddenStates = encOutputs[0]!;
+
+      // 2. Autoregressive greedy decoding loop
+      final startToken = tokenizer.padTokenId;
+      final generatedIds = <int>[startToken];
+      final maxLen = min(seqLen * 2 + 15, 128);
+
+      final decInputName = _decoderSession!.inputNames.firstWhere(
+        (n) => n.contains('input_ids') || n.contains('decoder'),
+        orElse: () => 'input_ids',
+      );
+      final encHiddenName = _decoderSession!.inputNames.firstWhere(
+        (n) => n.contains('hidden_states') || n.contains('encoder'),
+        orElse: () => 'encoder_hidden_states',
+      );
+      final hasEncMask = _decoderSession!.inputNames.any((n) => n.contains('encoder_attention_mask'));
+
+      for (int step = 0; step < maxLen; step++) {
+        final decInput = OrtValueTensor.createTensorWithDataList(generatedIds, [1, generatedIds.length]);
+        final decInputs = <String, OrtValue>{
+          decInputName: decInput,
+          encHiddenName: encoderHiddenStates,
+        };
+        if (hasEncMask) {
+          decInputs['encoder_attention_mask'] = encMask;
+        }
+
+        final decOutputs = _decoderSession!.run(runOptions, decInputs);
+        decInput.release();
+
+        if (decOutputs.isEmpty || decOutputs[0] == null) {
+          break;
+        }
+
+        final logitsVal = decOutputs[0]!.value;
+        decOutputs[0]!.release();
+
+        // Extract last token logits: shape [1, step + 1, vocab_size]
+        int bestId = tokenizer.eosTokenId;
+        if (logitsVal is List && logitsVal.isNotEmpty) {
+          final batch0 = logitsVal[0];
+          if (batch0 is List && batch0.isNotEmpty) {
+            final lastStep = batch0.last;
+            if (lastStep is List) {
+              double maxLogit = -double.infinity;
+              for (int v = 0; v < lastStep.length; v++) {
+                final logit = (lastStep[v] as num).toDouble();
+                if (logit > maxLogit) {
+                  maxLogit = logit;
+                  bestId = v;
+                }
+              }
+            }
+          }
+        }
+
+        if (bestId == tokenizer.eosTokenId || bestId == tokenizer.padTokenId) {
+          break;
+        }
+
+        generatedIds.add(bestId);
+      }
+
+      // Decode generated token IDs skipping start token
+      final resultTokens = generatedIds.skip(1).toList();
+      final translated = tokenizer.decode(resultTokens);
+      return translated.isNotEmpty ? translated : text;
+    } catch (e) {
+      debugPrint('[OnnxTranslationEngine] Inference error on text "$text": $e');
+      // Per specification: preserve original dialogue text on cue failure
+      return text;
+    } finally {
+      encInput?.release();
+      encMask?.release();
+      if (encOutputs != null) {
+        for (final o in encOutputs) {
+          o?.release();
+        }
+      }
+      runOptions.release();
     }
-    return _synthesizerTranslate(text, src, tgt);
   }
 
-  String _synthesizerTranslate(String text, String src, String tgt) {
-    final key = '$src-$tgt';
-    final dict = _dictionaries[key];
-    if (dict != null) {
-      // 1. Exact phrase match
-      if (dict.containsKey(text)) {
-        return dict[text]!;
-      }
-      // 2. Substring replacements
-      String transformed = text;
-      bool matched = false;
-      for (final entry in dict.entries) {
-        if (transformed.contains(entry.key)) {
-          transformed = transformed.replaceAll(entry.key, entry.value);
-          matched = true;
-        }
-      }
-      if (matched) return transformed;
-    }
-
-    // 3. Reverse dictionary check (e.g. ja-en if querying en-ja inverse)
-    final reverseKey = '$tgt-$src';
-    final reverseDict = _dictionaries[reverseKey];
-    if (reverseDict != null) {
-      for (final entry in reverseDict.entries) {
-        if (entry.value == text) {
-          return entry.key;
-        }
-      }
-    }
-
-    // Return the text with language indicator or natural wording
-    return text;
+  void dispose() {
+    _releaseSessions();
   }
 }

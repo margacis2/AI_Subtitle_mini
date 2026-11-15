@@ -1,14 +1,15 @@
 import 'dart:io';
+import 'package:flutter/foundation.dart';
+import 'package:whisper_flutter_new/whisper_flutter_new.dart';
 import '../../core/utilities/timestamp_utils.dart';
 import '../../domain/entities/subtitle_cue.dart';
-import '../media/media_inspector.dart';
 
 class WhisperEngine {
   static final WhisperEngine _instance = WhisperEngine._internal();
   factory WhisperEngine() => _instance;
   WhisperEngine._internal();
 
-  /// Transcribes 16kHz mono audio file using on-device Whisper model or acoustic pipeline.
+  /// Transcribes 16kHz mono audio file using genuine on-device Whisper.cpp native inference.
   Future<List<SubtitleCue>> transcribe({
     required String audioPath,
     required String modelPath,
@@ -22,20 +23,112 @@ class WhisperEngine {
       throw Exception('Audio file not found: $audioPath');
     }
 
-    final modelFile = File(modelPath);
-    final hasLocalModel = modelPath.isNotEmpty && await modelFile.exists();
+    if (modelPath.isEmpty || !await File(modelPath).exists()) {
+      throw Exception(
+        'Speech model file not found at: $modelPath. Please download a model from Model Library before transcribing.',
+      );
+    }
 
-    onProgress(0.1, hasLocalModel ? 'Loading Whisper neural model into memory...' : 'Initializing on-device acoustic speech analyzer...');
+    onProgress(0.1, 'Configuring Whisper.cpp native model...');
 
-    List<SubtitleCue> cues = [];
+    // Determine model type from file path
+    final fileName = File(modelPath).uri.pathSegments.last.toLowerCase();
+    WhisperModel whisperModel = WhisperModel.base;
+    if (fileName.contains('tiny')) {
+      whisperModel = WhisperModel.tiny;
+    } else if (fileName.contains('base')) {
+      whisperModel = WhisperModel.base;
+    } else if (fileName.contains('small')) {
+      whisperModel = WhisperModel.small;
+    } else if (fileName.contains('medium')) {
+      whisperModel = WhisperModel.medium;
+    } else if (fileName.contains('large-v1')) {
+      whisperModel = WhisperModel.largeV1;
+    } else if (fileName.contains('large')) {
+      whisperModel = WhisperModel.largeV2;
+    }
 
-    // 1. Try native whisper-cli binary if model is installed
-    if (hasLocalModel) {
+    final modelDir = File(modelPath).parent.path;
+
+    onProgress(0.2, 'Initializing native Whisper.cpp inference runtime...');
+
+    // 1. Try official native Whisper.cpp FFI bindings via whisper_flutter_new
+    try {
+      final whisper = Whisper(
+        model: whisperModel,
+        modelDir: modelDir,
+      );
+
+      onProgress(0.35, 'Running speech recognition inference on $audioPath...');
+
+      final response = await whisper.transcribe(
+        transcribeRequest: TranscribeRequest(
+          audio: audioPath,
+          language: language.toLowerCase(),
+          threads: threadCount,
+          isTranslate: false,
+        ),
+      );
+
+      onProgress(0.85, 'Extracting recognized speech segments and timestamps...');
+
+      final recognizedText = response.text.trim();
+      final segments = response.segments;
+
+      if ((segments == null || segments.isEmpty) && recognizedText.isEmpty) {
+        throw Exception('No speech detected in the selected audio.');
+      }
+
+      final List<SubtitleCue> cues = [];
+      int cueIndex = 1;
+
+      if (segments != null && segments.isNotEmpty) {
+        for (final seg in segments) {
+          final text = seg.text.trim();
+          if (text.isNotEmpty) {
+            cues.add(SubtitleCue(
+              projectId: projectId,
+              cueIndex: cueIndex++,
+              startMs: seg.fromTs.inMilliseconds,
+              endMs: seg.toTs.inMilliseconds,
+              text: text,
+            ));
+          }
+        }
+      }
+
+      // If segments list is empty but overall text was recognized, package as single cue
+      if (cues.isEmpty && recognizedText.isNotEmpty) {
+        cues.add(SubtitleCue(
+          projectId: projectId,
+          cueIndex: 1,
+          startMs: 0,
+          endMs: 5000,
+          text: recognizedText,
+        ));
+      }
+
+      if (cues.isEmpty) {
+        throw Exception('No speech detected in the selected audio.');
+      }
+
+      onProgress(1.0, 'Speech transcription completed successfully (${cues.length} cues).');
+      return cues;
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('whisper_flutter_new error: $e');
+      }
+
+      if (e.toString().contains('No speech detected')) {
+        rethrow;
+      }
+
+      // 2. Fallback: try whisper-cli if available in system PATH (desktop development/CLI builds)
       try {
         final cliResult = await Process.run('whisper-cli', [
           '-m', modelPath,
           '-f', audioPath,
-          '-l', language,
+          '-l', language.toLowerCase(),
           '-t', threadCount.toString(),
           '--output-srt',
         ]);
@@ -44,30 +137,19 @@ class WhisperEngine {
           final srtFile = File('$audioPath.srt');
           if (await srtFile.exists()) {
             final content = await srtFile.readAsString();
-            cues = _parseGeneratedSrt(content, projectId);
+            final cues = _parseGeneratedSrt(content, projectId);
             await srtFile.delete();
-            onProgress(1.0, 'Speech transcription completed.');
-            return cues;
+            if (cues.isNotEmpty) {
+              onProgress(1.0, 'Speech transcription completed via whisper-cli (${cues.length} cues).');
+              return cues;
+            }
           }
         }
       } catch (_) {}
+
+      // If both fail, fail with the genuine native exception message
+      throw Exception('Whisper speech recognition failed: $e');
     }
-
-    // 2. High-speed on-device speech acoustics inference & beam search
-    onProgress(0.3, 'Running acoustic encoder and voice activity detection...');
-    await Future.delayed(const Duration(milliseconds: 400));
-
-    onProgress(0.6, 'Transcribing spoken dialog & linguistic units ($language)...');
-    await Future.delayed(const Duration(milliseconds: 500));
-
-    onProgress(0.85, 'Synchronizing speech timestamps with audio timeline...');
-    await Future.delayed(const Duration(milliseconds: 300));
-
-    // Generate accurate, context-rich cues based on audio duration and target language
-    cues = await _generateAcousticCues(audioFile, projectId, language);
-
-    onProgress(1.0, 'Speech transcription completed successfully.');
-    return cues;
   }
 
   static List<SubtitleCue> _parseGeneratedSrt(String content, String projectId) {
@@ -111,138 +193,5 @@ class WhisperEngine {
     }
     commit();
     return cues;
-  }
-
-  static Future<List<SubtitleCue>> _generateAcousticCues(
-    File audioFile,
-    String projectId,
-    String language,
-  ) async {
-    int durationMs = 30000;
-    try {
-      final metadata = await MediaInspector().inspectMedia(audioFile.path);
-      if (metadata.durationMs != null && metadata.durationMs! > 0) {
-        durationMs = metadata.durationMs!;
-      } else {
-        final bytes = await audioFile.length();
-        // In 16kHz 16-bit mono: 32000 bytes/sec
-        final estSec = (bytes / 32000).round().clamp(5, 7200);
-        durationMs = estSec * 1000;
-      }
-    } catch (_) {}
-
-    final List<SubtitleCue> list = [];
-    int currentMs = 800;
-    int index = 1;
-
-    final phrases = _getSamplePhrases(language);
-
-    while (currentMs + 2000 <= durationMs && list.length < 150) {
-      // Natural speech cue duration: between 2200ms and 4500ms
-      final cueDuration = 2200 + ((index * 680) % 2300);
-      final endMs = (currentMs + cueDuration).clamp(currentMs + 1000, durationMs);
-      final text = phrases[(index - 1) % phrases.length];
-
-      list.add(SubtitleCue(
-        projectId: projectId,
-        cueIndex: index,
-        startMs: currentMs,
-        endMs: endMs,
-        text: text,
-      ));
-
-      // Natural pause between spoken sentences: 350ms to 700ms
-      currentMs = endMs + 400 + ((index * 130) % 300);
-      index++;
-    }
-
-    if (list.isEmpty) {
-      list.add(SubtitleCue(
-        projectId: projectId,
-        cueIndex: 1,
-        startMs: 500,
-        endMs: (durationMs > 2000 ? durationMs - 500 : 3000),
-        text: phrases[0],
-      ));
-    }
-
-    return list;
-  }
-
-  static List<String> _getSamplePhrases(String lang) {
-    switch (lang.toLowerCase()) {
-      case 'ja':
-        return [
-          'AI Sub Miniへようこそ。',
-          'すべての音声認識処理はデバイス上で安全に実行されます。',
-          'クラウドへのアップロードは一切不要で、プライバシーが保護されます。',
-          '字幕のタイムスタンプは正確に同期されています。',
-          'SRT、WebVTT、ASS形式にいつでもエクスポート可能です。',
-          'ニューラル機械翻訳で多言語字幕を即座に作成できます。',
-        ];
-      case 'ko':
-        return [
-          'AI Sub Mini에 오신 것을 환영합니다.',
-          '모든 음성 인식은 장치 내부에서 완전히 오프라인으로 처리됩니다.',
-          '개인정보는 외부 서버로 유출되지 않고 완벽하게 보호됩니다.',
-          '자막 타임스탬프가 영상 음성과 정밀하게 동기화됩니다.',
-          'SRT, WebVTT 및 ASS 자막 형식으로 손쉽게 내보낼 수 있습니다.',
-          '신경망 다국어 번역으로 손쉽게 자막을 변환하세요.',
-        ];
-      case 'hi':
-        return [
-          'AI Sub Mini में आपका स्वागत है।',
-          'सभी वॉयस रिकॉग्निशन प्रोसेसिंग पूरी तरह से आपके डिवाइस पर चलती है।',
-          'आपकी गोपनीयता 100% सुरक्षित है, कोई क्लाउड अपलोड नहीं है।',
-          'उपशीर्षक उच्च सटीकता के साथ ऑडियो से सिंक किए गए हैं।',
-          'आप किसी भी समय SRT, WebVTT और ASS फॉर्मेट में निर्यात कर सकते हैं।',
-          'ऑफलाइन न्यूरल ट्रांसलेशन के साथ वीडियो का अनुवाद करें।',
-        ];
-      case 'es':
-        return [
-          'Bienvenido a AI Sub Mini.',
-          'Todo el procesamiento de voz se realiza localmente en tu dispositivo.',
-          'Tu privacidad está 100% garantizada sin cargas a la nube.',
-          'Los subtítulos se sincronizan automáticamente con alta precisión.',
-          'Puedes exportar fácilmente en formatos SRT, WebVTT y ASS.',
-          'Traducción neural sin conexión con marcas de tiempo exactas.',
-        ];
-      case 'fr':
-        return [
-          'Bienvenue dans AI Sub Mini.',
-          'Tout le traitement vocal est exécuté localement sur votre appareil.',
-          'Votre vie privée est garantie à 100% sans aucun téléchargement cloud.',
-          'Les sous-titres sont synchronisés avec une grande précision.',
-          'Exportez facilement aux formats SRT, WebVTT et ASS.',
-          'Traduction neuronale hors ligne avec synchronisation temporelle.',
-        ];
-      case 'de':
-        return [
-          'Willkommen bei AI Sub Mini.',
-          'Die gesamte Spracherkennung läuft vollständig lokal auf Ihrem Gerät.',
-          'Ihre Privatsphäre ist zu 100% garantiert ohne Cloud-Uploads.',
-          'Untertitel werden mit hoher Präzision automatisch synchronisiert.',
-          'Exportieren Sie mühelos in die Formate SRT, WebVTT und ASS.',
-          'Offline-Übersetzung mit exakten Zeitstempeln.',
-        ];
-      case 'zh':
-        return [
-          '欢迎使用 AI Sub Mini。',
-          '所有语音识别与转写任务均在设备端本地离线运行。',
-          '数据绝不上传云端，全面保障您的隐私安全。',
-          '字幕时间戳已精确匹配音频对白。',
-          '支持一键导出为 SRT、WebVTT 和 ASS 高清字幕格式。',
-          '内置离线神经翻译引擎，快速完成多语种字幕生成。',
-        ];
-      default:
-        return [
-          'Welcome to AI Sub Mini.',
-          'All speech-to-text processing runs securely on your local device.',
-          'Your privacy is 100% guaranteed with zero cloud uploads or telemetry.',
-          'Subtitles are automatically synchronized with high temporal precision.',
-          'Easily edit, translate, and export to SRT, WebVTT, and SubStation Alpha.',
-          'Neural offline translation maintains perfect timestamp alignment.',
-        ];
-    }
   }
 }

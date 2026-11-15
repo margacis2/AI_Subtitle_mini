@@ -23,7 +23,8 @@ class SrtSerializer {
   /// Parses an SRT file string into a list of SubtitleCue objects.
   static List<SubtitleCue> parse(String content, {String projectId = ''}) {
     final List<SubtitleCue> cues = [];
-    final lines = content.replaceAll('\r\n', '\n').replaceAll('\r', '\n').split('\n');
+    final cleanContent = content.replaceFirst('\uFEFF', '');
+    final lines = cleanContent.replaceAll('\r\n', '\n').replaceAll('\r', '\n').split('\n');
 
     int index = 0;
     int? currentStart;
@@ -58,25 +59,30 @@ class SrtSerializer {
 
       if (trimmed.contains('-->')) {
         final arrowParts = trimmed.split('-->');
-        if (arrowParts.length == 2) {
-          currentStart = TimestampUtils.parseSrt(arrowParts[0]);
-          currentEnd = TimestampUtils.parseSrt(arrowParts[1]);
+        if (arrowParts.length >= 2) {
+          // If a previous cue had timestamps pending without an empty line separator, commit it
+          if (currentStart != null && currentTextLines.isNotEmpty) {
+            commitCue();
+          }
+          currentStart = TimestampUtils.parseSrt(arrowParts[0].trim());
+          // Handle coordinates / formatting attached to end timestamp (e.g., "00:00:05,000 X1:000")
+          final endToken = arrowParts[1].trim().split(' ').first;
+          currentEnd = TimestampUtils.parseSrt(endToken);
           continue;
         }
       }
 
-      // Check if it's just an integer cue index number
+      // Ignore sequence number if not yet tracking a cue
       if (currentStart == null && int.tryParse(trimmed) != null) {
         continue;
       }
 
-      // It's text
-      if (currentStart != null && currentEnd != null) {
+      if (currentStart != null) {
         currentTextLines.add(trimmed);
       }
     }
-
     commitCue();
+
     return cues;
   }
 }

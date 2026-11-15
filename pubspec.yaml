@@ -28,6 +28,9 @@ dependencies:
   device_info_plus: ^13.3.0
   battery_plus: ^7.1.2
   permission_handler: ^13.0.2
+  whisper_flutter_new: ^1.0.1
+  onnxruntime: ^1.4.1
+  ffmpeg_kit_flutter_new_min: ^3.6.8
 
 dev_dependencies:
   flutter_test:

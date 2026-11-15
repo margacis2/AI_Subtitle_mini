@@ -69,13 +69,18 @@ class AssSerializer {
     return buffer.toString();
   }
 
-  /// Parses an ASS file string into a list of SubtitleCue objects.
+  /// Parses an ASS / SSA file string into a list of SubtitleCue objects.
   static List<SubtitleCue> parse(String content, {String projectId = ''}) {
     final List<SubtitleCue> cues = [];
-    final lines = content.replaceAll('\r\n', '\n').replaceAll('\r', '\n').split('\n');
+    final cleanContent = content.replaceFirst('\uFEFF', '');
+    final lines = cleanContent.replaceAll('\r\n', '\n').replaceAll('\r', '\n').split('\n');
 
     bool inEvents = false;
     int index = 0;
+    int startIndex = 1;
+    int endIndex = 2;
+    int textIndex = 9;
+    int speakerIndex = 4;
 
     for (final line in lines) {
       final trimmed = line.trim();
@@ -88,25 +93,51 @@ class AssSerializer {
         continue;
       }
 
-      if (inEvents && trimmed.startsWith('Dialogue:')) {
-        // Dialogue: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-        final afterColon = trimmed.substring(9).trim();
-        final parts = afterColon.split(',');
-        if (parts.length >= 10) {
-          final startMs = TimestampUtils.parseAss(parts[1]);
-          final endMs = TimestampUtils.parseAss(parts[2]);
-          final speaker = parts[4].isNotEmpty ? parts[4] : null;
-          final text = parts.sublist(9).join(',').replaceAll('\\N', '\n').replaceAll('\\n', '\n').trim();
+      if (inEvents) {
+        if (trimmed.startsWith('Format:')) {
+          final fields = trimmed.substring(7).split(',').map((f) => f.trim().toLowerCase()).toList();
+          final sIdx = fields.indexOf('start');
+          final eIdx = fields.indexOf('end');
+          final tIdx = fields.indexOf('text');
+          final spkIdx = fields.indexOf('name');
+          if (sIdx != -1) startIndex = sIdx;
+          if (eIdx != -1) endIndex = eIdx;
+          if (tIdx != -1) textIndex = tIdx;
+          if (spkIdx != -1) speakerIndex = spkIdx;
+          continue;
+        }
 
-          index++;
-          cues.add(SubtitleCue(
-            projectId: projectId,
-            cueIndex: index,
-            startMs: startMs,
-            endMs: endMs,
-            text: text,
-            speaker: speaker,
-          ));
+        if (trimmed.startsWith('Dialogue:')) {
+          final afterColon = trimmed.substring(9).trim();
+          final parts = afterColon.split(',');
+          final minParts = (textIndex >= endIndex ? textIndex : endIndex) + 1;
+          if (parts.length >= minParts) {
+            final startMs = TimestampUtils.parseAss(parts[startIndex].trim());
+            final endMs = TimestampUtils.parseAss(parts[endIndex].trim());
+            final speaker = (speakerIndex < parts.length && parts[speakerIndex].trim().isNotEmpty)
+                ? parts[speakerIndex].trim()
+                : null;
+
+            final rawText = parts.sublist(textIndex).join(',');
+            // Strip ASS/SSA tags like {\pos(x,y)}, {\i1}, {\b1}, {\fnArial}
+            final cleanText = rawText
+                .replaceAll(RegExp(r'\{.*?\}'), '')
+                .replaceAll('\\N', '\n')
+                .replaceAll('\\n', '\n')
+                .trim();
+
+            if (cleanText.isNotEmpty) {
+              index++;
+              cues.add(SubtitleCue(
+                projectId: projectId,
+                cueIndex: index,
+                startMs: startMs,
+                endMs: endMs,
+                text: cleanText,
+                speaker: speaker,
+              ));
+            }
+          }
         }
       }
     }

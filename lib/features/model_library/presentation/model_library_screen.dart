@@ -1,3 +1,4 @@
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -15,8 +16,21 @@ class ModelLibraryScreen extends ConsumerStatefulWidget {
 class _ModelLibraryScreenState extends ConsumerState<ModelLibraryScreen> {
   final Map<String, double> _downloadProgress = {};
   final Map<String, String> _downloadStatus = {};
+  final Map<String, CancelToken> _cancelTokens = {};
+
+  void _cancelDownload(String modelId) {
+    _cancelTokens[modelId]?.cancel('Cancelled by user');
+    _cancelTokens.remove(modelId);
+    setState(() {
+      _downloadProgress.remove(modelId);
+      _downloadStatus.remove(modelId);
+    });
+  }
 
   Future<void> _startDownload(WhisperModelInfo model) async {
+    final cancelToken = CancelToken();
+    _cancelTokens[model.id] = cancelToken;
+
     setState(() {
       _downloadProgress[model.id] = 0.01;
       _downloadStatus[model.id] = 'Starting download...';
@@ -25,7 +39,9 @@ class _ModelLibraryScreenState extends ConsumerState<ModelLibraryScreen> {
     try {
       await WhisperModelManager().downloadModel(
         model: model,
+        cancelToken: cancelToken,
         onProgress: (p, s) {
+          if (!mounted) return;
           setState(() {
             _downloadProgress[model.id] = p;
             _downloadStatus[model.id] = s;
@@ -41,12 +57,13 @@ class _ModelLibraryScreenState extends ConsumerState<ModelLibraryScreen> {
         );
       }
     } catch (e) {
-      if (mounted) {
+      if (mounted && !cancelToken.isCancelled) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Download failed: $e')),
         );
       }
     } finally {
+      _cancelTokens.remove(model.id);
       if (mounted) {
         setState(() {
           _downloadProgress.remove(model.id);
@@ -155,9 +172,20 @@ class _ModelLibraryScreenState extends ConsumerState<ModelLibraryScreen> {
                         const SizedBox(height: 12),
                         LinearProgressIndicator(value: progress),
                         const SizedBox(height: 6),
-                        Text(
-                          statusText,
-                          style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.primary),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                statusText,
+                                style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.primary),
+                              ),
+                            ),
+                            TextButton.icon(
+                              onPressed: () => _cancelDownload(model.id),
+                              icon: const Icon(Icons.cancel_outlined, size: 16, color: Colors.redAccent),
+                              label: const Text('Cancel', style: TextStyle(color: Colors.redAccent, fontSize: 12)),
+                            ),
+                          ],
                         ),
                       ],
                     ],

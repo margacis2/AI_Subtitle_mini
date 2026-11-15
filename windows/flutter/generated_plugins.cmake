@@ -4,11 +4,13 @@
 
 list(APPEND FLUTTER_PLUGIN_LIST
   battery_plus
+  ffmpeg_kit_flutter_new_min
   permission_handler_windows
 )
 
 list(APPEND FLUTTER_FFI_PLUGIN_LIST
   jni
+  onnxruntime
 )
 
 set(PLUGIN_BUNDLED_LIBRARIES)
