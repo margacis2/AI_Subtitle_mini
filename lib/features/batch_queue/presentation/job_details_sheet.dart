@@ -48,6 +48,12 @@ class JobDetailsSheet extends StatelessWidget {
           const Divider(),
           _infoRow('Current Stage', job.stage.displayName),
           _infoRow('Progress', '${(job.progress * 100).toInt()}%'),
+          if (job.formattedElapsed != null) _infoRow('Elapsed Time', job.formattedElapsed!),
+          if (job.formattedEta != null) _infoRow('Estimated Remaining', job.formattedEta!),
+          if (job.formattedEstimatedTotal != null) _infoRow('Estimated Total', job.formattedEstimatedTotal!),
+          if (job.formattedAudioDuration != null) _infoRow('Audio Duration', job.formattedAudioDuration!),
+          if (job.currentChunk != null && job.totalChunks != null && job.totalChunks! > 1)
+            _infoRow('Audio Segment', 'Chunk ${job.currentChunk} of ${job.totalChunks}'),
           if (job.currentStep != null) _infoRow('Current Step', job.currentStep!),
           _infoRow('Created', dateFormat.format(job.createdAt)),
           if (job.completedAt != null) _infoRow('Completed', dateFormat.format(job.completedAt!)),

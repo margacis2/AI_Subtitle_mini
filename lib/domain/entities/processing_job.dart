@@ -54,6 +54,11 @@ class ProcessingJob extends Equatable {
   final String? outputPath;
   final String? settings;
   final String selectedModel;
+  final int? elapsedSeconds;
+  final int? etaSeconds;
+  final int? audioDurationSeconds;
+  final int? currentChunk;
+  final int? totalChunks;
 
   const ProcessingJob({
     required this.id,
@@ -70,7 +75,48 @@ class ProcessingJob extends Equatable {
     this.outputPath,
     this.settings,
     this.selectedModel = 'base',
+    this.elapsedSeconds,
+    this.etaSeconds,
+    this.audioDurationSeconds,
+    this.currentChunk,
+    this.totalChunks,
   });
+
+  String? get formattedElapsed {
+    if (elapsedSeconds == null) return null;
+    final d = Duration(seconds: elapsedSeconds!);
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    final h = d.inHours;
+    return h > 0 ? '${h.toString().padLeft(2, '0')}:$m:$s' : '$m:$s';
+  }
+
+  String? get formattedEta {
+    if (etaSeconds == null) return null;
+    final d = Duration(seconds: etaSeconds!);
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    final h = d.inHours;
+    return h > 0 ? '${h.toString().padLeft(2, '0')}:$m:$s' : '$m:$s';
+  }
+
+  String? get formattedEstimatedTotal {
+    if (elapsedSeconds == null || etaSeconds == null) return null;
+    final d = Duration(seconds: elapsedSeconds! + etaSeconds!);
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    final h = d.inHours;
+    return h > 0 ? '${h.toString().padLeft(2, '0')}:$m:$s' : '$m:$s';
+  }
+
+  String? get formattedAudioDuration {
+    if (audioDurationSeconds == null) return null;
+    final d = Duration(seconds: audioDurationSeconds!);
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    final h = d.inHours;
+    return h > 0 ? '${h.toString().padLeft(2, '0')}:$m:$s' : '$m:$s';
+  }
 
   ProcessingJob copyWith({
     String? id,
@@ -87,6 +133,11 @@ class ProcessingJob extends Equatable {
     String? outputPath,
     String? settings,
     String? selectedModel,
+    int? elapsedSeconds,
+    int? etaSeconds,
+    int? audioDurationSeconds,
+    int? currentChunk,
+    int? totalChunks,
   }) {
     return ProcessingJob(
       id: id ?? this.id,
@@ -103,6 +154,11 @@ class ProcessingJob extends Equatable {
       outputPath: outputPath ?? this.outputPath,
       settings: settings ?? this.settings,
       selectedModel: selectedModel ?? this.selectedModel,
+      elapsedSeconds: elapsedSeconds ?? this.elapsedSeconds,
+      etaSeconds: etaSeconds ?? this.etaSeconds,
+      audioDurationSeconds: audioDurationSeconds ?? this.audioDurationSeconds,
+      currentChunk: currentChunk ?? this.currentChunk,
+      totalChunks: totalChunks ?? this.totalChunks,
     );
   }
 
@@ -122,6 +178,11 @@ class ProcessingJob extends Equatable {
       'output_path': outputPath,
       'settings': settings,
       'selected_model': selectedModel,
+      'elapsed_seconds': elapsedSeconds,
+      'eta_seconds': etaSeconds,
+      'audio_duration_seconds': audioDurationSeconds,
+      'current_chunk': currentChunk,
+      'total_chunks': totalChunks,
     };
   }
 
@@ -148,6 +209,11 @@ class ProcessingJob extends Equatable {
       outputPath: map['output_path'] as String?,
       settings: map['settings'] as String?,
       selectedModel: map['selected_model'] as String? ?? 'base',
+      elapsedSeconds: map['elapsed_seconds'] as int?,
+      etaSeconds: map['eta_seconds'] as int?,
+      audioDurationSeconds: map['audio_duration_seconds'] as int?,
+      currentChunk: map['current_chunk'] as int?,
+      totalChunks: map['total_chunks'] as int?,
     );
   }
 
@@ -167,5 +233,10 @@ class ProcessingJob extends Equatable {
         outputPath,
         settings,
         selectedModel,
+        elapsedSeconds,
+        etaSeconds,
+        audioDurationSeconds,
+        currentChunk,
+        totalChunks,
       ];
 }

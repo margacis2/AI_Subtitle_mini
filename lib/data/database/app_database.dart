@@ -25,7 +25,7 @@ class AppDatabase {
 
     return await openDatabase(
       dbPath,
-      version: 2,
+      version: 3,
       onConfigure: (db) async {
         await db.execute('PRAGMA foreign_keys = ON');
       },
@@ -36,6 +36,23 @@ class AppDatabase {
           } catch (_) {}
           try {
             await db.execute("ALTER TABLE processing_jobs ADD COLUMN selected_model TEXT DEFAULT 'base'");
+          } catch (_) {}
+        }
+        if (oldVersion < 3) {
+          try {
+            await db.execute('ALTER TABLE processing_jobs ADD COLUMN elapsed_seconds INTEGER');
+          } catch (_) {}
+          try {
+            await db.execute('ALTER TABLE processing_jobs ADD COLUMN eta_seconds INTEGER');
+          } catch (_) {}
+          try {
+            await db.execute('ALTER TABLE processing_jobs ADD COLUMN audio_duration_seconds INTEGER');
+          } catch (_) {}
+          try {
+            await db.execute('ALTER TABLE processing_jobs ADD COLUMN current_chunk INTEGER');
+          } catch (_) {}
+          try {
+            await db.execute('ALTER TABLE processing_jobs ADD COLUMN total_chunks INTEGER');
           } catch (_) {}
         }
       },
@@ -100,7 +117,12 @@ class AppDatabase {
             input_path TEXT,
             output_path TEXT,
             settings TEXT,
-            selected_model TEXT DEFAULT 'base'
+            selected_model TEXT DEFAULT 'base',
+            elapsed_seconds INTEGER,
+            eta_seconds INTEGER,
+            audio_duration_seconds INTEGER,
+            current_chunk INTEGER,
+            total_chunks INTEGER
           )
         ''');
 

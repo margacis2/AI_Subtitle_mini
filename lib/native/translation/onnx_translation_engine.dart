@@ -24,6 +24,12 @@ class TranslationException implements Exception {
   }
 }
 
+class _DialogueSegment {
+  final String text;
+  final bool isSourceScript;
+  const _DialogueSegment(this.text, this.isSourceScript);
+}
+
 class OnnxTranslationEngine {
   static final OnnxTranslationEngine _instance = OnnxTranslationEngine._internal();
   factory OnnxTranslationEngine() => _instance;
@@ -126,12 +132,124 @@ class OnnxTranslationEngine {
       );
     }
 
-    return _runSeq2Seq(
-      text: clean,
-      sourceLang: src,
-      targetLang: tgt,
-      cueIndex: cueIndex,
-    );
+    // 1. Script-aware mixed-language segmentation
+    final segments = _segmentMixedDialogue(clean, src, tgt);
+    if (segments.length == 1 && segments[0].isSourceScript) {
+      return await _runSeq2Seq(
+        text: clean,
+        sourceLang: src,
+        targetLang: tgt,
+        cueIndex: cueIndex,
+      );
+    }
+
+    // 2. Process segments
+    final List<String> translatedParts = [];
+    for (final seg in segments) {
+      if (seg.isSourceScript) {
+        final segText = seg.text.trim();
+        if (segText.isEmpty) continue;
+        final trans = await _runSeq2Seq(
+          text: segText,
+          sourceLang: src,
+          targetLang: tgt,
+          cueIndex: cueIndex,
+        );
+        translatedParts.add(trans);
+      } else {
+        translatedParts.add(seg.text);
+      }
+    }
+
+    final combined = _stitchSegments(translatedParts);
+    if (combined.isEmpty) {
+      throw TranslationException(
+        message: 'Neural model produced empty translation for dialogue: "$text"',
+        sourceLang: src,
+        targetLang: tgt,
+        cueIndex: cueIndex,
+      );
+    }
+
+    return combined;
+  }
+
+  List<_DialogueSegment> _segmentMixedDialogue(String text, String sourceLang, String targetLang) {
+    RegExp? sourcePattern;
+    if (sourceLang == 'ja') {
+      // Hiragana, Katakana, Kanji, Japanese punctuation
+      sourcePattern = RegExp(r'([\u3040-\u309f\u30a0-\u30ff\u4e00-\u9faf\u3000-\u303f]+)');
+    } else if (sourceLang == 'ko') {
+      sourcePattern = RegExp(r'([\uac00-\ud7af\u1100-\u11ff]+)');
+    } else if (sourceLang == 'zh') {
+      sourcePattern = RegExp(r'([\u4e00-\u9fff]+)');
+    } else if (sourceLang == 'hi') {
+      sourcePattern = RegExp(r'([\u0900-\u097f]+)');
+    }
+
+    if (sourcePattern == null) {
+      return [_DialogueSegment(text, true)];
+    }
+
+    // If text contains NO characters of source script, it is already target/neutral
+    if (!sourcePattern.hasMatch(text)) {
+      return [_DialogueSegment(text, false)];
+    }
+
+    // If text contains NO latin/target characters, it is purely source
+    if (targetLang == 'en' && !RegExp(r'[a-zA-Z]').hasMatch(text)) {
+      return [_DialogueSegment(text, true)];
+    }
+
+    final matches = sourcePattern.allMatches(text).toList();
+    if (matches.isEmpty) {
+      return [_DialogueSegment(text, true)];
+    }
+
+    final segments = <_DialogueSegment>[];
+    int lastEnd = 0;
+
+    for (final match in matches) {
+      if (match.start > lastEnd) {
+        final nonSrc = text.substring(lastEnd, match.start);
+        if (nonSrc.trim().isNotEmpty) {
+          segments.add(_DialogueSegment(nonSrc, false));
+        }
+      }
+      final src = text.substring(match.start, match.end);
+      if (src.trim().isNotEmpty) {
+        segments.add(_DialogueSegment(src, true));
+      }
+      lastEnd = match.end;
+    }
+
+    if (lastEnd < text.length) {
+      final trailing = text.substring(lastEnd);
+      if (trailing.trim().isNotEmpty) {
+        segments.add(_DialogueSegment(trailing, false));
+      }
+    }
+
+    return segments;
+  }
+
+  String _stitchSegments(List<String> parts) {
+    final buffer = StringBuffer();
+    for (int i = 0; i < parts.length; i++) {
+      final part = parts[i].trim();
+      if (part.isEmpty) continue;
+      if (buffer.isNotEmpty) {
+        final lastChar = buffer.toString()[buffer.length - 1];
+        if (lastChar != ' ' && !RegExp(r'[,.:;?!]').hasMatch(part[0])) {
+          buffer.write(' ');
+        }
+      }
+      buffer.write(part);
+    }
+    return buffer.toString()
+        .replaceAll(RegExp(r'\s+([,.:;?!])'), r'$1')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
   }
 
   Future<String> _runSeq2Seq({
@@ -182,7 +300,7 @@ class OnnxTranslationEngine {
       // 2. Autoregressive greedy decoding loop
       final startToken = tokenizer.padTokenId;
       final generatedIds = <int>[startToken];
-      final maxLen = min(seqLen * 2 + 20, 128);
+      final maxLen = min(seqLen * 3 + 20, 128);
 
       for (int step = 0; step < maxLen; step++) {
         final decInput = OrtValueTensor.createTensorWithDataList(generatedIds, [1, generatedIds.length]);
@@ -211,6 +329,10 @@ class OnnxTranslationEngine {
             if (lastStep is List) {
               double maxLogit = -double.infinity;
               for (int v = 0; v < lastStep.length; v++) {
+                // Strictly suppress pad and unk tokens so they can never be generated
+                if (v == tokenizer.padTokenId || v == tokenizer.unkTokenId) {
+                  continue;
+                }
                 final logit = (lastStep[v] as num).toDouble();
                 if (logit > maxLogit) {
                   maxLogit = logit;
@@ -221,7 +343,8 @@ class OnnxTranslationEngine {
           }
         }
 
-        if (bestId == tokenizer.eosTokenId || bestId == tokenizer.padTokenId) {
+        // Only EOS stops generation
+        if (bestId == tokenizer.eosTokenId) {
           break;
         }
 
@@ -230,15 +353,20 @@ class OnnxTranslationEngine {
 
       // Decode generated token IDs skipping start token
       final resultTokens = generatedIds.skip(1).toList();
-      final translated = tokenizer.decode(resultTokens);
+      String translated = tokenizer.decode(resultTokens);
 
       if (translated.isEmpty) {
         throw TranslationException(
-          message: 'Neural model produced empty translation for dialogue: "$text"',
+          message: 'Neural model produced empty translation for dialogue: "$text" (Generated tokens: ${resultTokens.length})',
           sourceLang: sourceLang,
           targetLang: targetLang,
           cueIndex: cueIndex,
         );
+      }
+
+      // If translation has a trailing question mark not present in the source, clean it
+      if (translated.endsWith('?') && !text.endsWith('?') && !text.endsWith('？')) {
+        translated = translated.substring(0, translated.length - 1).trim();
       }
 
       // Detect obvious source passthrough when translating between different language scripts

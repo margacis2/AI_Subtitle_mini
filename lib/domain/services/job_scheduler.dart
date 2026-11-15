@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import '../../data/database/app_database.dart';
 import '../../native/media/audio_extractor.dart';
+import '../../native/media/wav_utils.dart';
 import '../../native/whisper/whisper_engine.dart';
 import '../../native/whisper/whisper_model_manager.dart';
 import '../entities/processing_job.dart';
@@ -28,6 +29,7 @@ class JobScheduler {
   final StreamController<ProcessingJob> _jobStreamController = StreamController<ProcessingJob>.broadcast();
   Stream<ProcessingJob> get jobStream => _jobStreamController.stream;
 
+  final Set<String> _cancelledJobIds = {};
   bool _isProcessing = false;
 
   void triggerQueueProcessing({UserSettings? settings}) {
@@ -58,6 +60,10 @@ class JobScheduler {
 
   Future<void> _executeJob(ProcessingJob job, UserSettings settings) async {
     try {
+      if (_cancelledJobIds.contains(job.id)) {
+        throw Exception('Job cancelled by user.');
+      }
+
       final project = await _db.getProject(job.projectId);
       if (project == null) {
         final failed = job.copyWith(
@@ -78,6 +84,7 @@ class JobScheduler {
             inputPath: project.mediaPath!,
             knownDurationMs: project.durationMs,
             onProgress: (p, s) {
+              if (_cancelledJobIds.contains(job.id)) throw Exception('Job cancelled by user.');
               _updateJob(job, JobStage.extractingAudio, 0.15 + (p * 0.15), s);
             },
           );
@@ -88,13 +95,17 @@ class JobScheduler {
         }
       }
 
-      // Step 2: Speech-to-Text Transcription
+      if (_cancelledJobIds.contains(job.id)) {
+        throw Exception('Job cancelled by user.');
+      }
+
+      // Step 2: Speech-to-Text Transcription with Chunking & Real-Time Timing
       final selectedModelId = job.selectedModel.isNotEmpty ? job.selectedModel : project.selectedModel;
       await _updateJob(job, JobStage.transcribing, 0.35, 'Verifying Whisper ${selectedModelId.toUpperCase()} model...');
-      
+
       final models = await _modelManager.getModelsWithStatus();
       final matchingModel = models.where((m) => m.id.toLowerCase() == selectedModelId.toLowerCase()).firstOrNull;
-      
+
       if (matchingModel == null || !matchingModel.isInstalled || matchingModel.localPath == null || !File(matchingModel.localPath!).existsSync()) {
         throw StateError(
           'Whisper ${selectedModelId.toUpperCase()} model is not installed locally. '
@@ -103,7 +114,18 @@ class JobScheduler {
       }
       final modelPath = matchingModel.localPath!;
 
-      await _updateJob(job, JobStage.transcribing, 0.38, 'Loading ${matchingModel.displayName} into memory...');
+      final audioFile = File(audioPath);
+      final totalAudioMs = WavUtils.getDurationMs(audioFile);
+      final audioDurationSec = (totalAudioMs / 1000).round();
+      final transcribeStopwatch = Stopwatch()..start();
+
+      await _updateJob(
+        job,
+        JobStage.transcribing,
+        0.35,
+        'Loading ${matchingModel.displayName} into memory...',
+        audioDurationSeconds: audioDurationSec,
+      );
 
       final rawCues = await _whisperEngine.transcribe(
         audioPath: audioPath,
@@ -112,9 +134,45 @@ class JobScheduler {
         language: project.sourceLanguage,
         threadCount: settings.threadCount,
         onProgress: (p, s) {
-          _updateJob(job, JobStage.transcribing, 0.40 + (p * 0.32), s);
+          _updateJob(
+            job,
+            JobStage.transcribing,
+            0.35 + (p * 0.40),
+            s,
+            elapsedSeconds: transcribeStopwatch.elapsed.inSeconds,
+            audioDurationSeconds: audioDurationSec,
+          );
         },
+        onDetailedProgress: ({
+          required double progress,
+          required String step,
+          int? currentChunk,
+          int? totalChunks,
+          Duration? elapsed,
+          Duration? estimatedRemaining,
+          Duration? estimatedTotal,
+          Duration? audioDuration,
+        }) {
+          _updateJob(
+            job,
+            JobStage.transcribing,
+            0.35 + (progress * 0.40),
+            step,
+            elapsedSeconds: elapsed?.inSeconds ?? transcribeStopwatch.elapsed.inSeconds,
+            etaSeconds: estimatedRemaining?.inSeconds,
+            audioDurationSeconds: audioDuration?.inSeconds ?? audioDurationSec,
+            currentChunk: currentChunk,
+            totalChunks: totalChunks,
+          );
+        },
+        isCancelled: () => _cancelledJobIds.contains(job.id),
       );
+
+      transcribeStopwatch.stop();
+
+      if (_cancelledJobIds.contains(job.id)) {
+        throw Exception('Job cancelled by user.');
+      }
 
       // Step 3: Neural Translation (if user requested translation)
       List<SubtitleCue> cuesToFormat = rawCues;
@@ -134,15 +192,35 @@ class JobScheduler {
           );
         }
 
+        final transStopwatch = Stopwatch()..start();
         cuesToFormat = await _translationEngine.translateCues(
           cues: rawCues,
           sourceLang: project.sourceLanguage,
           targetLang: project.targetLanguage!,
           packLocalPath: matchingPack.localPath,
           onProgress: (p, s) {
-            _updateJob(job, JobStage.translating, 0.75 + (p * 0.15), s);
+            if (_cancelledJobIds.contains(job.id)) throw Exception('Job cancelled by user.');
+            final elapsedSec = transStopwatch.elapsed.inSeconds;
+            int? etaSec;
+            if (p > 0.05) {
+              final totalEst = elapsedSec / p;
+              etaSec = (totalEst - elapsedSec).round();
+            }
+            _updateJob(
+              job,
+              JobStage.translating,
+              0.75 + (p * 0.15),
+              s,
+              elapsedSeconds: elapsedSec,
+              etaSeconds: etaSec,
+            );
           },
         );
+        transStopwatch.stop();
+      }
+
+      if (_cancelledJobIds.contains(job.id)) {
+        throw Exception('Job cancelled by user.');
       }
 
       // Step 4: Formatting, Sentence Boundary Splitting & Profanity Filter
@@ -171,36 +249,60 @@ class JobScheduler {
         progress: 1.0,
         currentStep: 'Transcription & formatting completed (${finalCues.length} cues)',
         completedAt: DateTime.now(),
+        etaSeconds: 0,
       );
       await _db.saveJob(completedJob);
       _jobStreamController.add(completedJob);
     } catch (e) {
-      final failedJob = job.copyWith(
-        stage: JobStage.failed,
-        errorDetails: e.toString(),
-        currentStep: 'Failed: ${e.toString()}',
+      final isCancel = e.toString().contains('cancelled') || _cancelledJobIds.contains(job.id);
+      final endJob = job.copyWith(
+        stage: isCancel ? JobStage.cancelled : JobStage.failed,
+        errorDetails: isCancel ? null : e.toString(),
+        currentStep: isCancel ? 'Job cancelled by user' : 'Failed: ${e.toString()}',
+        completedAt: DateTime.now(),
+        etaSeconds: null,
       );
-      await _db.saveJob(failedJob);
-      _jobStreamController.add(failedJob);
+      await _db.saveJob(endJob);
+      _jobStreamController.add(endJob);
+    } finally {
+      _cancelledJobIds.remove(job.id);
     }
   }
 
-  Future<void> _updateJob(ProcessingJob job, JobStage stage, double progress, String step) async {
+  Future<void> _updateJob(
+    ProcessingJob job,
+    JobStage stage,
+    double progress,
+    String step, {
+    int? elapsedSeconds,
+    int? etaSeconds,
+    int? audioDurationSeconds,
+    int? currentChunk,
+    int? totalChunks,
+  }) async {
     final updated = job.copyWith(
       stage: stage,
-      progress: progress,
+      progress: progress.clamp(0.0, 1.0),
       currentStep: step,
+      elapsedSeconds: elapsedSeconds ?? job.elapsedSeconds,
+      etaSeconds: etaSeconds ?? job.etaSeconds,
+      audioDurationSeconds: audioDurationSeconds ?? job.audioDurationSeconds,
+      currentChunk: currentChunk ?? job.currentChunk,
+      totalChunks: totalChunks ?? job.totalChunks,
     );
     await _db.saveJob(updated);
     _jobStreamController.add(updated);
   }
 
   Future<void> cancelJob(String jobId) async {
+    _cancelledJobIds.add(jobId);
     final job = await _db.getJob(jobId);
     if (job != null) {
       final cancelled = job.copyWith(
         stage: JobStage.cancelled,
         currentStep: 'Job cancelled by user',
+        completedAt: DateTime.now(),
+        etaSeconds: null,
       );
       await _db.saveJob(cancelled);
       _jobStreamController.add(cancelled);
@@ -208,6 +310,7 @@ class JobScheduler {
   }
 
   Future<void> retryJob(String jobId) async {
+    _cancelledJobIds.remove(jobId);
     final job = await _db.getJob(jobId);
     if (job != null) {
       final retried = job.copyWith(
@@ -216,6 +319,8 @@ class JobScheduler {
         currentStep: 'Queued for processing',
         retryCount: job.retryCount + 1,
         errorDetails: null,
+        elapsedSeconds: null,
+        etaSeconds: null,
       );
       await _db.saveJob(retried);
       _jobStreamController.add(retried);

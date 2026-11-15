@@ -291,6 +291,68 @@ class _ModernJobCard extends ConsumerWidget {
                     valueColor: AlwaysStoppedAnimation<Color>(statusColor),
                   ),
                 ),
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.surfaceContainerHighest.withAlpha(50),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: theme.dividerColor.withAlpha(40)),
+                  ),
+                  child: Column(
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(Icons.timer_outlined, size: 14, color: theme.colorScheme.primary),
+                              const SizedBox(width: 4),
+                              Text(
+                                'Elapsed: ${job.formattedElapsed ?? "00:00"}',
+                                style: theme.textTheme.labelSmall?.copyWith(fontWeight: FontWeight.w600),
+                              ),
+                            ],
+                          ),
+                          Text(
+                            job.formattedEta != null
+                                ? 'Remaining: ~${job.formattedEta}'
+                                : (job.elapsedSeconds != null && job.elapsedSeconds! > 5
+                                    ? 'Calculating remaining...'
+                                    : 'Estimating...'),
+                            style: theme.textTheme.labelSmall?.copyWith(
+                              color: statusColor,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                      if (job.formattedEstimatedTotal != null || job.formattedAudioDuration != null || (job.totalChunks != null && job.totalChunks! > 1)) ...[
+                        const SizedBox(height: 6),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            if (job.formattedAudioDuration != null)
+                              Text(
+                                'Audio: ${job.formattedAudioDuration}',
+                                style: theme.textTheme.labelSmall?.copyWith(color: Colors.grey),
+                              ),
+                            if (job.currentChunk != null && job.totalChunks != null && job.totalChunks! > 1)
+                              Text(
+                                'Chunk: ${job.currentChunk} / ${job.totalChunks}',
+                                style: theme.textTheme.labelSmall?.copyWith(fontWeight: FontWeight.w500),
+                              ),
+                            if (job.formattedEstimatedTotal != null)
+                              Text(
+                                'Est. Total: ${job.formattedEstimatedTotal}',
+                                style: theme.textTheme.labelSmall?.copyWith(color: Colors.grey),
+                              ),
+                          ],
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
               ],
               if (job.errorDetails != null) ...[
                 const SizedBox(height: 8),

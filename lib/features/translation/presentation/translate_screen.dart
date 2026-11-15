@@ -137,9 +137,20 @@ class _TranslateScreenState extends ConsumerState<TranslateScreen> with SingleTi
 
   int _successfulCuesCount = 0;
   int _failedCuesCount = 0;
+  Duration? _elapsedDuration;
+  Duration? _estimatedRemaining;
+  final Set<int> _failedCueIndexes = {};
+
+  String _formatDuration(Duration? d) {
+    if (d == null) return '--:--';
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    final h = d.inHours;
+    return h > 0 ? '${h.toString().padLeft(2, '0')}:$m:$s' : '$m:$s';
+  }
 
   // --- 2. Start Neural Batch Translation ---
-  Future<void> _startSubtitleTranslation(TranslationPackInfo? installedPack) async {
+  Future<void> _startSubtitleTranslation(TranslationPackInfo? installedPack, {bool retryFailedOnly = false}) async {
     if (_sourceCues.isEmpty) return;
     if (installedPack == null || !installedPack.isInstalled || installedPack.localPath == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -158,13 +169,20 @@ class _TranslateScreenState extends ConsumerState<TranslateScreen> with SingleTi
       _isTranslatingSubtitles = true;
       _cancelRequested = false;
       _translationProgress = 0.0;
-      _successfulCuesCount = 0;
-      _failedCuesCount = 0;
+      if (!retryFailedOnly) {
+        _successfulCuesCount = 0;
+        _failedCuesCount = 0;
+        _failedCueIndexes.clear();
+        _translatedCues.clear();
+      }
       _translationStatus = 'Initializing ONNX neural model...';
     });
 
+    final stopwatch = Stopwatch()..start();
     final total = _sourceCues.length;
-    final List<SubtitleCue> result = [];
+    final Map<int, SubtitleCue> currentTranslated = {
+      for (var c in _translatedCues) c.cueIndex: c,
+    };
 
     try {
       for (int i = 0; i < total; i++) {
@@ -177,9 +195,19 @@ class _TranslateScreenState extends ConsumerState<TranslateScreen> with SingleTi
         }
 
         final cue = _sourceCues[i];
+        if (retryFailedOnly && currentTranslated.containsKey(cue.cueIndex)) {
+          continue; // Already successfully translated
+        }
+
         setState(() {
-          _translationStatus = 'Running neural inference on cue ${i + 1} of $total...';
+          _translationStatus = 'Translating cue ${i + 1} of $total...';
           _translationProgress = i / total;
+          _elapsedDuration = stopwatch.elapsed;
+          if (_successfulCuesCount > 0) {
+            final avgMs = stopwatch.elapsedMilliseconds / _successfulCuesCount;
+            final remainingCues = total - _successfulCuesCount;
+            _estimatedRemaining = Duration(milliseconds: (avgMs * remainingCues).round());
+          }
         });
 
         try {
@@ -191,45 +219,50 @@ class _TranslateScreenState extends ConsumerState<TranslateScreen> with SingleTi
             cueIndex: cue.cueIndex,
           );
 
-          // Strictly preserve timestamps and cue ordering
-          result.add(cue.copyWith(
+          currentTranslated[cue.cueIndex] = cue.copyWith(
             text: translatedText,
             originalText: cue.originalText ?? cue.text,
-          ));
-          _successfulCuesCount++;
-        } catch (cueErr) {
-          _failedCuesCount++;
-          debugPrint('Translation error on cue #${cue.cueIndex}: $cueErr');
-          throw TranslationException(
-            message: 'Failed translating cue #${cue.cueIndex} ("${cue.text}"): $cueErr',
-            sourceLang: _sourceLang,
-            targetLang: _targetLang,
-            cueIndex: cue.cueIndex,
           );
+          _failedCueIndexes.remove(cue.cueIndex);
+          _successfulCuesCount = currentTranslated.length;
+        } catch (cueErr) {
+          _failedCueIndexes.add(cue.cueIndex);
+          debugPrint('Translation error on cue #${cue.cueIndex}: $cueErr');
         }
 
+        _failedCuesCount = _failedCueIndexes.length;
         setState(() {
           _translationProgress = (i + 1) / total;
-          _translationStatus = 'Translated ${i + 1} of $total cues...';
-          _translatedCues = List.from(result);
+          _translatedCues = currentTranslated.values.toList()
+            ..sort((a, b) => a.cueIndex.compareTo(b.cueIndex));
+          _elapsedDuration = stopwatch.elapsed;
         });
       }
 
+      stopwatch.stop();
       setState(() {
         _isTranslatingSubtitles = false;
-        _translationStatus = 'Translation completed: $_successfulCuesCount cues translated.';
+        _translationStatus = _failedCuesCount > 0
+            ? 'Completed: $_successfulCuesCount translated, $_failedCuesCount failed.'
+            : 'Translation completed: $_successfulCuesCount cues translated.';
       });
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Successfully translated $_successfulCuesCount cues to $_targetLang!')),
+          SnackBar(
+            content: Text(
+              _failedCuesCount > 0
+                  ? 'Translated $_successfulCuesCount cues to $_targetLang ($_failedCuesCount failed).'
+                  : 'Successfully translated all $_successfulCuesCount cues to $_targetLang!',
+            ),
+          ),
         );
       }
     } catch (e) {
-      _failedCuesCount = total - _successfulCuesCount;
+      stopwatch.stop();
       setState(() {
         _isTranslatingSubtitles = false;
-        _translationStatus = 'Error during translation ($_failedCuesCount remaining failed): $e';
+        _translationStatus = 'Error during translation: $e';
       });
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -476,12 +509,60 @@ class _TranslateScreenState extends ConsumerState<TranslateScreen> with SingleTi
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        Text('Translating Dialogue...', style: theme.textTheme.titleSmall),
+                        Text('Translating Dialogue (${_sourceLang.toUpperCase()} → ${_targetLang.toUpperCase()})',
+                            style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold)),
                         Text('${(_translationProgress * 100).toStringAsFixed(0)}%'),
                       ],
                     ),
                     const SizedBox(height: 8),
                     LinearProgressIndicator(value: _translationProgress),
+                    const SizedBox(height: 12),
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.surfaceContainerHighest.withAlpha(50),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Column(
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                'Progress: $_successfulCuesCount / ${_sourceCues.length}',
+                                style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                              ),
+                              Row(
+                                children: [
+                                  Text('Translated: $_successfulCuesCount',
+                                      style: const TextStyle(color: Colors.green, fontSize: 12, fontWeight: FontWeight.w600)),
+                                  const SizedBox(width: 8),
+                                  Text('Failed: $_failedCuesCount',
+                                      style: TextStyle(
+                                          color: _failedCuesCount > 0 ? Colors.redAccent : Colors.grey,
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w600)),
+                                ],
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 6),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text('Elapsed: ${_formatDuration(_elapsedDuration)}',
+                                  style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                              Text(
+                                _estimatedRemaining != null
+                                    ? 'Est. remaining: ~${_formatDuration(_estimatedRemaining)}'
+                                    : 'Calculating remaining...',
+                                style: TextStyle(fontSize: 12, color: theme.colorScheme.primary, fontWeight: FontWeight.w500),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
                     const SizedBox(height: 8),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -490,11 +571,14 @@ class _TranslateScreenState extends ConsumerState<TranslateScreen> with SingleTi
                           child: Text(
                             _translationStatus,
                             style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.primary),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                        TextButton(
+                        TextButton.icon(
+                          icon: const Icon(Icons.cancel_outlined, size: 16, color: Colors.redAccent),
+                          label: const Text('Cancel', style: TextStyle(color: Colors.redAccent)),
                           onPressed: () => setState(() => _cancelRequested = true),
-                          child: const Text('Cancel', style: TextStyle(color: Colors.redAccent)),
                         ),
                       ],
                     ),
@@ -503,15 +587,34 @@ class _TranslateScreenState extends ConsumerState<TranslateScreen> with SingleTi
               ),
             ),
           ] else ...[
-            SizedBox(
-              height: 48,
-              child: FilledButton.icon(
-                icon: const Icon(Icons.translate_rounded),
-                label: Text(
-                  _translatedCues.isNotEmpty ? 'Re-Translate Subtitles' : 'Translate All Cues with Neural Engine',
+            Column(
+              children: [
+                SizedBox(
+                  height: 48,
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    icon: const Icon(Icons.translate_rounded),
+                    label: Text(
+                      _translatedCues.isNotEmpty ? 'Re-Translate All Subtitles' : 'Translate All Cues with Neural Engine',
+                    ),
+                    onPressed: isPackInstalled ? () => _startSubtitleTranslation(matchingPack) : null,
+                  ),
                 ),
-                onPressed: isPackInstalled ? () => _startSubtitleTranslation(matchingPack) : null,
-              ),
+                if (_failedCuesCount > 0) ...[
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    height: 40,
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      icon: const Icon(Icons.refresh_rounded, color: Colors.amber),
+                      label: Text('Retry $_failedCuesCount Failed Cues'),
+                      onPressed: isPackInstalled
+                          ? () => _startSubtitleTranslation(matchingPack, retryFailedOnly: true)
+                          : null,
+                    ),
+                  ),
+                ],
+              ],
             ),
           ],
           const SizedBox(height: 16),
